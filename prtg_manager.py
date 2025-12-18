@@ -41,9 +41,17 @@ Workflows:
 Usage:
     python prtg_onboarding.py existing 1234 5678 --dry-run
     python prtg_onboarding.py new 100 "Core Switch" 10.10.10.1
-
+ 
 Requirements:
     pip install requests pysnmp
+ 
+Hosted Monitor (PPHM) Notes:
+    - When using PRTG Hosted Monitor, you MUST run this script from a location
+      with local network access to your devices (e.g., behind a VPN or on a 
+      local server).
+    - The 'group_id' provided for new devices MUST belong to a REMOTE PROBE 
+      installed on your local network. Do not add local devices to the 
+      "Hosted Probe" (Cloud), as it cannot reach private RFC1918 addresses.
 """
 from __future__ import annotations
 
@@ -55,6 +63,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
+import ipaddress
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -274,6 +283,20 @@ class PRTGClient:
             return devices[0].get("host")
         return None
 
+    def get_probe_for_group(self, group_id: int) -> Optional[str]:
+        """Fetches the Name of the Probe for a given Group ID."""
+        # Using .json?content=groups&columns=probe
+        data = self._req("GET", "/api/table.json", params={
+            "content": "groups",
+            "columns": "probe",
+            "id": group_id,
+            "output": "json"
+        })
+        groups = data.get("groups", [])
+        if groups:
+            return groups[0].get("probe")
+        return None
+
     def list_sensors(self, device_id: int) -> List[Dict]:
         """Get all sensors for a device."""
         data = self._req("GET", "/api/table.json", params={
@@ -454,6 +477,26 @@ def main():
             logger.info("[DRY-RUN] Would create device. Skipping to simulation.")
             targets.append((99999, args.host, True))
         else:
+            # Safety Check: PPHM Hosted Probe vs Private IP
+            try:
+                probe_name = prtg.get_probe_for_group(args.group_id)
+                if probe_name and "Hosted Probe" in probe_name:
+                    # Check if IP is private
+                    try:
+                        ip_obj = ipaddress.ip_address(args.host)
+                        if ip_obj.is_private:
+                            logger.warning(f"!!! CAUTION !!!")
+                            logger.warning(f"You are adding a device with a PRIVATE IP ({args.host}) to the '{probe_name}'.")
+                            logger.warning(f"The Hosted Probe runs in the cloud and cannot reach your local network.")
+                            logger.warning(f"Verify you are using a Group ID belonging to a LOCAL REMOTE PROBE.")
+                            logger.warning(f"Waiting 10 seconds. Press Ctrl+C to cancel...")
+                            time.sleep(10)
+                    except ValueError:
+                        # Host might be a DNS name, skip check or try resolve (skipping for now)
+                        pass
+            except Exception as e:
+                logger.warning(f"Could not verify Probe type: {e}")
+
             try:
                 did = prtg.add_device(args.group_id, args.name, args.host)
                 logger.info(f"Device created with ID {did}")

@@ -63,6 +63,16 @@ python3 prtg_manager.py existing 5044
 python3 prtg_manager.py existing 5044 5045 5060 --dry-run
 ```
 
+## PRTG Hosted Monitor (PPHM) Support
+
+This script is compatible with PRTG Hosted Monitor, but requires specific network configuration:
+
+1.  **Run Location**: You must run this script from a machine on your **local network** (e.g., a laptop on VPN or a local server) that has SNMP access to your devices. You cannot run this on the PRTG Cloud instance itself.
+2.  **Target Group**: When adding `new` devices, the `<GROUP_ID>` you provide **MUST** belong to a **Remote Probe** installed on your local network.
+    -   *Why?* The "Hosted Probe" runs in the cloud and cannot reach your private IP addresses (RFC1918).
+    -   The script includes a safety check that will warn you if you attempt to add a private IP to a Hosted Probe group.
+3.  **URL**: Set `PRTG_BASE_URL` to your hosted instance (e.g., `https://myinstance.my-prtg.com`).
+
 ## How it Works
 
 1.  **SNMP Scan**: The script uses `pysnmp` to walk the device's Interface and ifXTable MIBs directy.
