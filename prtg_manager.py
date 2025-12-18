@@ -62,13 +62,16 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional
 import ipaddress
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from pysnmp.hlapi import *
+from pysnmp.hlapi import (  # pylint: disable=no-name-in-module
+    CommunityData, ContextData, ObjectIdentity, ObjectType,
+    SnmpEngine, UdpTransportTarget, nextCmd
+)
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -109,6 +112,7 @@ OID_IF_NAME = '1.3.6.1.2.1.31.1.1.1.1'    # ifXTable name (e.g. Gi1/0/1)
 
 @dataclass
 class Config:
+    """Application Configuration model."""
     base_url: str
     username: str
     passhash: str
@@ -123,9 +127,10 @@ class Config:
         # Defaults
         snmp_comm = os.environ.get("PRTG_SNMP_COMMUNITY", "public")
         
+        # Check env vars
         missing = [key for key in ("PRTG_BASE_URL", "PRTG_USER", "PRTG_PASSHASH") if key not in os.environ]
         if missing:
-            logger.error(f"Missing env vars: {', '.join(missing)}")
+            logger.error("Missing env vars: %s", ', '.join(missing))
             sys.exit(1)
             
         return Config(
@@ -150,17 +155,18 @@ class OnboardingResult:
     errors: List[str] = field(default_factory=list)
 
     def print_summary(self) -> None:
-        logger.info(f"=== Summary for Device {self.device_id} ({self.device_ip}) ===")
-        logger.info(f"  Interfaces Scanned (Local SNMP): {self.interfaces_found}")
-        logger.info(f"  Eligible (Physical + Up): {self.interfaces_eligible}")
-        logger.info(f"  Traffic Sensors Created: {self.traffic_sensors_created}")
+        """Prints a summary of the onboarding results."""
+        logger.info("=== Summary for Device %s (%s) ===", self.device_id, self.device_ip)
+        logger.info("  Interfaces Scanned (Local SNMP): %s", self.interfaces_found)
+        logger.info("  Eligible (Physical + Up): %s", self.interfaces_eligible)
+        logger.info("  Traffic Sensors Created: %s", self.traffic_sensors_created)
         if self.foundational_sensors_created:
-            logger.info(f"  Core Sensors Created: {', '.join(self.foundational_sensors_created)}")
-        logger.info(f"  Legacy Sensors Paused: {self.legacy_sensors_paused}")
-        logger.info(f"  PING Dependency Set: {self.dependency_set}")
+            logger.info("  Core Sensors Created: %s", ', '.join(self.foundational_sensors_created))
+        logger.info("  Legacy Sensors Paused: %s", self.legacy_sensors_paused)
+        logger.info("  PING Dependency Set: %s", self.dependency_set)
         if self.errors:
             for err in self.errors:
-                logger.error(f"  ! Error: {err}")
+                logger.error("  ! Error: %s", err)
 
 class SNMPScanner:
     """Handles direct SNMP communication with the device."""
@@ -182,20 +188,20 @@ class SNMPScanner:
             lexicographicMode=False
         )
 
-        for errorIndication, errorStatus, errorIndex, varBinds in iterator:
-            if errorIndication:
-                logger.warning(f"SNMP Error on {host}: {errorIndication}")
+        for error_indication, error_status, _error_index, var_binds in iterator:
+            if error_indication:
+                logger.warning("SNMP Error on %s: %s", host, error_indication)
                 break
-            elif errorStatus:
-                logger.warning(f"SNMP Error: {errorStatus.prettyPrint()}")
+            if error_status:
+                logger.warning("SNMP Error: %s", error_status.prettyPrint())
                 break
             
-            for varBind in varBinds:
+            for var_bind in var_binds:
                 # varBind[0] is OID, varBind[1] is Value
                 # Extract the last part of OID as index
                 try:
-                    index = int(varBind[0][-1])
-                    value = varBind[1].prettyPrint()
+                    index = int(var_bind[0][-1])
+                    value = var_bind[1].prettyPrint()
                     results[index] = value
                 except (ValueError, IndexError):
                     continue
@@ -206,13 +212,13 @@ class SNMPScanner:
         Performs a full interface scan merging standard MIB-II and ifXTable.
         Returns list of dicts: {ifindex, iftype, ifadminstatus, ifname, ifalias}
         """
-        logger.info(f"Starting Local SNMP Scan on {host}...")
+        logger.info("Starting Local SNMP Scan on %s...", host)
         
         # Parallel-ish fetching (sequential here for simplicity, but cleaner than monolithic)
         # 1. Critical Filters
         indices = self._walk_oid(host, OID_IF_INDEX)
         if not indices:
-            logger.error(f"SNMP Walk failed or returned no interfaces for {host}")
+            logger.error("SNMP Walk failed or returned no interfaces for %s", host)
             return []
 
         admin_statuses = self._walk_oid(host, OID_IF_ADMIN_STATUS)
@@ -239,7 +245,7 @@ class SNMPScanner:
             }
             compiled_interfaces.append(interface)
 
-        logger.info(f"SNMP Scan Complete. Found {len(compiled_interfaces)} total interfaces.")
+        logger.info("SNMP Scan Complete. Found %s total interfaces.", len(compiled_interfaces))
         return compiled_interfaces
 
 class PRTGClient:
@@ -266,7 +272,7 @@ class PRTGClient:
                 return resp.json()
             return resp.text
         except Exception as e:
-            logger.error(f"API Request Failed ({path}): {e}")
+            logger.error("API Request Failed (%s): %s", path, e)
             raise
 
     def get_device_host(self, device_id: int) -> Optional[str]:
@@ -316,15 +322,17 @@ class PRTGClient:
         try:
             # addsensor3 returns JSON with objid
             return int(json.loads(resp).get("objid"))
-        except:
+        except (ValueError, TypeError, KeyError):
             # Fallback if text returned
-            logger.warning(f"Could not parse ID from creation response: {resp}")
+            logger.warning("Could not parse ID from creation response: %s", resp)
             return 0
 
     def pause_sensor(self, sensor_id: int, msg: str):
+        """Pauses a sensor with a message."""
         self._req("GET", "/api/pause.htm", params={"id": sensor_id, "action": 0, "pausemsg": msg})
 
     def set_dependency(self, device_id: int, sensor_id: int):
+        """Sets the device dependency to a specific sensor."""
         self._req("POST", "/api/setobjectproperty.htm", params={
             "id": device_id, "name": "dependencytype", "value": 1
         })
@@ -338,14 +346,14 @@ class PRTGClient:
         })
         try:
             return int(json.loads(resp).get("objid"))
-        except:
-            raise Exception(f"Failed to create device. Response: {resp}")
+        except (ValueError, KeyError, TypeError) as e:
+            raise Exception(f"Failed to create device. Response: {resp}") from e
 
 # --- Logic Functions ---
 
 def ensure_core_sensors(client: PRTGClient, device_id: int, sensors: List[Dict], result: OnboardingResult, dry_run: bool) -> int:
     """Checks for Ping, CPU, Mem, Uptime. Returns Ping ID."""
-    existing_types = {s.get("sensortype"): s.get("objid") for s in sensors}
+    # existing_types = {s.get("sensortype"): s.get("objid") for s in sensors} # Unused
     ping_id = None
     
     # Check Ping specifically (handle variations like 'ping' or 'ping_v2')
@@ -392,7 +400,7 @@ def process_traffic_sensors(client: PRTGClient, device_id: int, interfaces: List
     created_ids = []
     
     # 1. Identify existing ifIndexes to avoid duplicates
-    existing_indices = set()
+    # existing_indices = set() # Unused
     for s in sensors:
         if "traffic" in s.get("sensortype", ""):
             # Attempt to parse ifIndex from parameter/settings is hard via API table
@@ -470,7 +478,7 @@ def main():
             if ip:
                 targets.append((did, ip, False))
             else:
-                logger.error(f"Could not resolve IP for device {did}")
+                logger.error("Could not resolve IP for device %s", did)
 
     elif args.command == "new":
         if args.dry_run:
@@ -486,10 +494,17 @@ def main():
                         ip_obj = ipaddress.ip_address(args.host)
                         if ip_obj.is_private:
                             logger.warning(f"!!! CAUTION !!!")
-                            logger.warning(f"You are adding a device with a PRIVATE IP ({args.host}) to the '{probe_name}'.")
-                            logger.warning(f"The Hosted Probe runs in the cloud and cannot reach your local network.")
-                            logger.warning(f"Verify you are using a Group ID belonging to a LOCAL REMOTE PROBE.")
-                            logger.warning(f"Waiting 10 seconds. Press Ctrl+C to cancel...")
+                            logger.warning(
+                                "You are adding a device with a PRIVATE IP (%s) to the '%s'.",
+                                args.host, probe_name
+                            )
+                            logger.warning(
+                                "The Hosted Probe runs in the cloud and cannot reach your local network."
+                            )
+                            logger.warning(
+                                "Verify you are using a Group ID belonging to a LOCAL REMOTE PROBE."
+                            )
+                            logger.warning("Waiting 10 seconds. Press Ctrl+C to cancel...")
                             time.sleep(10)
                     except ValueError:
                         # Host might be a DNS name, skip check or try resolve (skipping for now)
