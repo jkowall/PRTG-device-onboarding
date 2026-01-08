@@ -61,6 +61,8 @@ import logging
 import os
 import sys
 import time
+import asyncio
+import getpass
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import ipaddress
@@ -68,9 +70,9 @@ import ipaddress
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from pysnmp.hlapi import (  # pylint: disable=no-name-in-module
+from pysnmp.hlapi.v3arch import (  # pylint: disable=no-name-in-module
     CommunityData, ContextData, ObjectIdentity, ObjectType,
-    SnmpEngine, UdpTransportTarget, nextCmd
+    SnmpEngine, UdpTransportTarget, walk_cmd
 )
 
 # --- Logging Setup ---
@@ -114,29 +116,52 @@ OID_IF_NAME = '1.3.6.1.2.1.31.1.1.1.1'    # ifXTable name (e.g. Gi1/0/1)
 class Config:
     """Application Configuration model."""
     base_url: str
-    username: str
-    passhash: str
-    snmp_community: str
+    username: Optional[str] = None
+    passhash: Optional[str] = None
+    api_token: Optional[str] = None
+    snmp_community: str = "public"
     snmp_port: int = 161
     verify_ssl: bool = True
     request_timeout: int = 60
 
     @staticmethod
-    def from_env() -> "Config":
-        """Loads configuration from Environment Variables."""
-        # Defaults
-        snmp_comm = os.environ.get("PRTG_SNMP_COMMUNITY", "public")
+    def get_with_prompt(arg_val: Optional[str], env_var: str, prompt: str, is_password: bool = False, required: bool = True) -> Optional[str]:
+        """Helper to get config value from CLI, Env, or Prompt."""
+        if arg_val:
+            return arg_val
+        if env_var in os.environ:
+            return os.environ[env_var]
         
-        # Check env vars
-        missing = [key for key in ("PRTG_BASE_URL", "PRTG_USER", "PRTG_PASSHASH") if key not in os.environ]
-        if missing:
-            logger.error("Missing env vars: %s", ', '.join(missing))
-            sys.exit(1)
-            
+        if not required:
+            return None
+
+        # Interactive fallback
+        if is_password:
+            return getpass.getpass(f"{prompt}: ")
+        return input(f"{prompt}: ")
+
+    @staticmethod
+    def from_args(args: argparse.Namespace) -> "Config":
+        """Loads configuration from CLI args, Env, or interactive prompt."""
+        base_url = Config.get_with_prompt(args.url, "PRTG_BASE_URL", "PRTG Base URL (e.g. https://xxxx.my-prtg.com)")
+        
+        # Check for API Token first (modern approach)
+        api_token = Config.get_with_prompt(args.api_token, "PRTG_API_TOKEN", "PRTG API Token (leave blank for User/Passhash)", is_password=True, required=False)
+        
+        username = None
+        passhash = None
+        
+        if not api_token:
+            username = Config.get_with_prompt(args.user, "PRTG_USER", "PRTG Username")
+            passhash = Config.get_with_prompt(args.passhash, "PRTG_PASSHASH", "PRTG Passhash/API Key", is_password=True)
+
+        snmp_comm = Config.get_with_prompt(args.snmp_community, "PRTG_SNMP_COMMUNITY", "SNMP Community (default: public)", required=False) or "public"
+
         return Config(
-            base_url=os.environ["PRTG_BASE_URL"].rstrip("/"),
-            username=os.environ["PRTG_USER"],
-            passhash=os.environ["PRTG_PASSHASH"],
+            base_url=base_url.rstrip("/"),
+            username=username,
+            passhash=passhash,
+            api_token=api_token,
             snmp_community=snmp_comm,
             verify_ssl=os.environ.get("PRTG_VERIFY_SSL", "true").lower() != "false",
         )
@@ -176,19 +201,20 @@ class SNMPScanner:
         self.port = port
         self.snmp_engine = SnmpEngine()
 
-    def _walk_oid(self, host: str, oid: str) -> Dict[int, Any]:
+    async def _walk_oid(self, host: str, oid: str) -> Dict[int, Any]:
         """Walks a specific OID and returns {ifIndex: value}."""
         results = {}
-        iterator = nextCmd(
+        transport = await UdpTransportTarget.create((host, self.port), timeout=1.0, retries=1)
+        iterator = walk_cmd(
             self.snmp_engine,
             CommunityData(self.community, mpModel=1), # v2c
-            UdpTransportTarget((host, self.port), timeout=1.0, retries=1),
+            transport,
             ContextData(),
             ObjectType(ObjectIdentity(oid)),
             lexicographicMode=False
         )
 
-        for error_indication, error_status, _error_index, var_binds in iterator:
+        async for error_indication, error_status, _error_index, var_binds in iterator:
             if error_indication:
                 logger.warning("SNMP Error on %s: %s", host, error_indication)
                 break
@@ -200,6 +226,9 @@ class SNMPScanner:
                 # varBind[0] is OID, varBind[1] is Value
                 # Extract the last part of OID as index
                 try:
+                    # var_bind[0] is the returned OID. We need the index part which is the suffix.
+                    # The suffix can be multiple parts, but for these MIBs it's typically one.
+                    # If we use ObjectIdentity(oid), var_bind[0] will be the full OID.
                     index = int(var_bind[0][-1])
                     value = var_bind[1].prettyPrint()
                     results[index] = value
@@ -207,27 +236,26 @@ class SNMPScanner:
                     continue
         return results
 
-    def scan_interfaces(self, host: str) -> List[Dict[str, Any]]:
+    async def scan_interfaces(self, host: str) -> List[Dict[str, Any]]:
         """
         Performs a full interface scan merging standard MIB-II and ifXTable.
         Returns list of dicts: {ifindex, iftype, ifadminstatus, ifname, ifalias}
         """
         logger.info("Starting Local SNMP Scan on %s...", host)
         
-        # Parallel-ish fetching (sequential here for simplicity, but cleaner than monolithic)
         # 1. Critical Filters
-        indices = self._walk_oid(host, OID_IF_INDEX)
+        indices = await self._walk_oid(host, OID_IF_INDEX)
         if not indices:
             logger.error("SNMP Walk failed or returned no interfaces for %s", host)
             return []
 
-        admin_statuses = self._walk_oid(host, OID_IF_ADMIN_STATUS)
-        types = self._walk_oid(host, OID_IF_TYPE)
+        admin_statuses = await self._walk_oid(host, OID_IF_ADMIN_STATUS)
+        types = await self._walk_oid(host, OID_IF_TYPE)
         
         # 2. Descriptive Data
-        names = self._walk_oid(host, OID_IF_NAME)
-        aliases = self._walk_oid(host, OID_IF_ALIAS)
-        descrs = self._walk_oid(host, OID_IF_DESCR)
+        names = await self._walk_oid(host, OID_IF_NAME)
+        aliases = await self._walk_oid(host, OID_IF_ALIAS)
+        descrs = await self._walk_oid(host, OID_IF_DESCR)
 
         compiled_interfaces = []
         for idx in indices:
@@ -261,7 +289,13 @@ class PRTGClient:
 
     def _req(self, method: str, path: str, params: Dict = None) -> Any:
         params = params or {}
-        params.update({"username": self.config.username, "passhash": self.config.passhash})
+        
+        # Use API Token if available, otherwise fallback to Username/Passhash
+        if self.config.api_token:
+            params.update({"apitoken": self.config.api_token})
+        else:
+            params.update({"username": self.config.username, "passhash": self.config.passhash})
+            
         url = f"{self.config.base_url}{path}"
         
         try:
@@ -351,7 +385,7 @@ class PRTGClient:
 
 # --- Logic Functions ---
 
-def ensure_core_sensors(client: PRTGClient, device_id: int, sensors: List[Dict], result: OnboardingResult, dry_run: bool) -> int:
+async def ensure_core_sensors(client: PRTGClient, device_id: int, sensors: List[Dict], result: OnboardingResult, dry_run: bool) -> int:
     """Checks for Ping, CPU, Mem, Uptime. Returns Ping ID."""
     # existing_types = {s.get("sensortype"): s.get("objid") for s in sensors} # Unused
     ping_id = None
@@ -389,7 +423,7 @@ def ensure_core_sensors(client: PRTGClient, device_id: int, sensors: List[Dict],
                     new_id = client.add_sensor(device_id, prtg_type, {"name": name})
                     result.foundational_sensors_created.append(name)
                     if key == "ping": ping_id = new_id
-                    time.sleep(1) # Rate limit safety
+                    await asyncio.sleep(1) # Rate limit safety
                 except Exception as e:
                     result.errors.append(f"Failed to create {name}: {e}")
 
@@ -447,8 +481,16 @@ def process_traffic_sensors(client: PRTGClient, device_id: int, interfaces: List
 
 # --- Main Execution ---
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="PRTG Onboarding (Hybrid Mode)")
+    
+    # Global Config Arguments
+    parser.add_argument("--url", help="PRTG Base URL")
+    parser.add_argument("--api-token", help="PRTG API Token (v21.1+)")
+    parser.add_argument("--user", help="PRTG Username")
+    parser.add_argument("--passhash", help="PRTG Passhash/API Key")
+    parser.add_argument("--snmp-community", help="SNMP Community String")
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Mode: Existing
@@ -464,7 +506,7 @@ def main():
     cmd_new.add_argument("--dry-run", action="store_true")
 
     args = parser.parse_args()
-    config = Config.from_env()
+    config = Config.from_args(args)
     
     prtg = PRTGClient(config)
     snmp = SNMPScanner(config.snmp_community, config.snmp_port)
@@ -505,7 +547,7 @@ def main():
                                 "Verify you are using a Group ID belonging to a LOCAL REMOTE PROBE."
                             )
                             logger.warning("Waiting 10 seconds. Press Ctrl+C to cancel...")
-                            time.sleep(10)
+                            await asyncio.sleep(10)
                     except ValueError:
                         # Host might be a DNS name, skip check or try resolve (skipping for now)
                         pass
@@ -516,7 +558,7 @@ def main():
                 did = prtg.add_device(args.group_id, args.name, args.host)
                 logger.info(f"Device created with ID {did}")
                 targets.append((did, args.host, True))
-                time.sleep(30) # Wait for PRTG internal commit
+                await asyncio.sleep(30) # Wait for PRTG internal commit
             except Exception as e:
                 logger.error(f"Fatal: {e}")
                 sys.exit(1)
@@ -526,7 +568,7 @@ def main():
         result = OnboardingResult(device_id, device_ip)
         
         # 1. Local SNMP Scan (The Core Fix)
-        interfaces = snmp.scan_interfaces(device_ip)
+        interfaces = await snmp.scan_interfaces(device_ip)
         result.interfaces_found = len(interfaces)
         
         if not interfaces:
@@ -539,7 +581,7 @@ def main():
         current_sensors = [] if args.dry_run and is_new else prtg.list_sensors(device_id)
 
         # 3. Create Core Sensors
-        ping_id = ensure_core_sensors(prtg, device_id, current_sensors, result, args.dry_run)
+        ping_id = await ensure_core_sensors(prtg, device_id, current_sensors, result, args.dry_run)
 
         # 4. Create Traffic Sensors
         new_traffic_ids = process_traffic_sensors(prtg, device_id, interfaces, current_sensors, result, args.dry_run)
@@ -563,4 +605,4 @@ def main():
         result.print_summary()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
