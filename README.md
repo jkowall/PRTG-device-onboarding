@@ -13,24 +13,41 @@ This script automates the onboarding and updating of devices in PRTG.
 
 ## Prerequisites
 
-1.  **Python 3.x**
+1.  **Python 3.12+**: Required for compatibility with modern `pysnmp` and `asyncio`.
 2.  **Network Access**: The machine running this script must have **SNMP access (UDP 161)** to the target devices.
 3.  **Dependencies**:
     ```bash
-    pip install requests pysnmp
+    pip install -r requirements.txt
     ```
 
-## Configuration (Environment Variables)
+## Configuration
 
-The script relies on environment variables for credentials.
+The script supports three ways to configure credentials, prioritized in this order:
+1. **Command Line Arguments**
+2. **Environment Variables**
+3. **Interactive Prompts** (if values are missing)
+
+### Command Line Flags
+| Flag | Description |
+|------|-------------|
+| `--url` | Base URL of PRTG server |
+| `--api-token` | API Token (v21.1+) |
+| `--user` | PRTG Username (Legacy) |
+| `--passhash` | Passhash or API Key (Legacy) |
+| `--snmp-community` | SNMP Community string |
+
+### Environment Variables
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `PRTG_BASE_URL` | URL of your PRTG server (e.g. `https://prtg.corp`) | Yes |
-| `PRTG_USER` | PRTG API Username | Yes |
-| `PRTG_PASSHASH` | PRTG API Passhash (Found in User Settings) | Yes |
+| `PRTG_BASE_URL` | URL of your PRTG server | Yes |
+| `PRTG_API_TOKEN`| PRTG API Token | No* |
+| `PRTG_USER` | PRTG API Username | No* |
+| `PRTG_PASSHASH` | PRTG API Passhash | No* |
 | `PRTG_SNMP_COMMUNITY` | SNMP Community String (default: `public`) | No |
 | `PRTG_VERIFY_SSL` | Verify SSL Certificates (`true`/`false`) | No |
+
+*\*You must provide either an API Token OR a Username + Passhash combo.*
 
 ## Usage
 
@@ -41,11 +58,11 @@ The script has two modes: `new` and `existing`.
 Adds a new device to PRTG, scans it locally, and adds sensors.
 
 ```bash
-# Syntax
-python3 prtg_manager.py new <GROUP_ID> "<DEVICE_NAME>" <IP_OR_HOSTNAME> [--dry-run]
+# Using CLI flags
+python prtg_manager.py --url "https://xxxx.my-prtg.com" --api-token "TOKEN_HERE" new <GROUP_ID> "<DEVICE_NAME>" <IP_OR_HOSTNAME>
 
-# Example
-python3 prtg_manager.py new 2001 "Core-Router-01" 192.168.1.1
+# Using interactive fallback (prompts for missing info)
+python prtg_manager.py new 2001 "Core-Router-01" 192.168.1.1
 ```
 
 ### 2. Update Existing Device(s)
@@ -53,14 +70,8 @@ python3 prtg_manager.py new 2001 "Core-Router-01" 192.168.1.1
 Updates sensors for devices already in PRTG. Useful for fixing missing descriptions or adding new ports.
 
 ```bash
-# Syntax
-python3 prtg_manager.py existing <DEVICE_ID> [DEVICE_ID_2 ...] [--dry-run]
-
-# Example (Single)
-python3 prtg_manager.py existing 5044
-
-# Example (Multiple)
-python3 prtg_manager.py existing 5044 5045 5060 --dry-run
+# Example (Multiple devices)
+python prtg_manager.py --url "https://prtg.local" --user "admin" --passhash "xxx" existing 5044 5045 5060 --dry-run
 ```
 
 ## PRTG Hosted Monitor (PPHM) Support
