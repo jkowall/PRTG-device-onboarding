@@ -313,8 +313,8 @@ class PRTGClient:
         """Fetches the IP/Hostname of a device from PRTG."""
         data = self._req("GET", "/api/table.json", params={
             "content": "devices",
-            "columns": "host",
-            "id": device_id,
+            "columns": "objid,host",
+            "filter_objid": device_id,
             "output": "json"
         })
         # Parse devices result
