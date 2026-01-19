@@ -15,3 +15,10 @@ This file contains instructions for AI agents working on this project.
     -   **Major** (1.x.x): Breaking changes.
 
 3.  **Sync Code Version**: If `prtg_manager.py` contains a `__version__` variable or header comment, update it to match the new version in `CHANGELOG.md`.
+
+## Testing & Verification Rules
+
+1.  **Mandatory Testing**: Use `task_boundary` to create a `VERIFICATION` phase for every task.
+2.  **Add Tests**: Whenever writing logic, creating unit tests (e.g., `unittest` or `pytest`) or verification scripts is mandatory.
+3.  **Run Before Push**: You must run the tests and verify the output matches expectations before pushing any code.
+4.  **User Review First**: NEVER push changes to the remote repository without asking the user to review the changes first. Use `notify_user` to request approval.
