@@ -45,3 +45,6 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 -   `fix: ...` for bug fixes
 -   `docs: ...` for documentation
 -   `chore: ...` for maintenance/refactoring
+
+## Security & Integrity
+-   **GPG Signing**: All commits MUST be signed. Ensure your environment is configured for GPG signing or use the `-S` flag.
