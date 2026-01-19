@@ -67,6 +67,35 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import ipaddress
 
+import subprocess
+import importlib.util
+
+def check_and_install_packages():
+    """Checks for required packages and installs them if missing."""
+    required_packages = {
+        "requests": "requests",
+        "pysnmp": "pysnmp>=7.1.22"
+    }
+    
+    missing = []
+    for package, install_name in required_packages.items():
+        if importlib.util.find_spec(package) is None:
+            missing.append(install_name)
+    
+    if missing:
+        print(f"Missing required packages: {', '.join(missing)}")
+        print("Attempting to auto-install...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+            print("Installation successful. Continuing...")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to install packages: {e}")
+            print("Please run: pip install -r requirements.txt")
+            sys.exit(1)
+
+# Run check before imports that might fail
+check_and_install_packages()
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
