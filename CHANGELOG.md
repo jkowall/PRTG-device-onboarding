@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+## [1.2.0] - 2026-01-19
 
 ### Added
 - **Dynamic Sensor Cloning**: Implemented a "Clone & Rename" strategy to bypass PRTG API sensor creation limitations.
