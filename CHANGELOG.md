@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+### Added
+- **Dynamic Sensor Cloning**: Implemented a "Clone & Rename" strategy to bypass PRTG API sensor creation limitations.
+- **Template Discovery**: Script now automatically finds existing sensors to use as templates for new ones.
+
+### Fixed
+- **Sensor Creation Error**: Resolved HTTP 404 errors when adding sensors by replacing the invalid `addsensor3.htm` endpoint with `duplicateobject.htm`.
+
 ## [1.1.0] - 2026-01-08
 
 ### Added

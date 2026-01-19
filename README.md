@@ -89,7 +89,8 @@ This script is compatible with PRTG Hosted Monitor, but requires specific networ
 1.  **SNMP Scan**: The script uses `pysnmp` to walk the device's Interface and ifXTable MIBs directy.
 2.  **Filter**: It filters for interfaces where `ifType` is physical (Gigabit, FastEthernet, etc.) and `ifAdminStatus` is Up.
 3.  **Match**: It compares found interfaces with existing PRTG sensors.
-4.  **Create**: It calls PRTG API `addsensor3` to create missing traffic sensors using the correct `ifIndex` and naming convention (`Traffic [Alias]`).
+4.  **Clone & Configure**: It finds an existing sensor of the same type in PRTG, clones it using `duplicateobject.htm`, and updates its properties (Interface Index, Name) locally. 
+    *   *Note*: This requires at least one "Template" sensor of each type (Ping, SNMP Traffic, etc.) to exist somewhere in your PRTG installation.
 5.  **Core Sensors**: Ensures Ping, CPU, Memory, and Uptime sensors exist.
 
 ## License

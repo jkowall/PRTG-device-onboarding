@@ -348,18 +348,57 @@ class PRTGClient:
         })
         return data.get("sensors", [])
 
-    def add_sensor(self, device_id: int, sensortype: str, payload: Dict) -> int:
-        payload["id"] = device_id
-        payload["sensortype"] = sensortype
-        # PRTG 'addsensor3' is more programmatic friendly than 'addsensor'
-        resp = self._req("POST", "/api/addsensor3.htm", params=payload)
+    def set_property(self, object_id: int, name: str, value: Any):
+        """Sets a property on a PRTG object."""
+        self._req("POST", "/api/setobjectproperty.htm", params={
+            "id": object_id, "name": name, "value": value
+        })
+
+    def find_template_sensor(self, sensor_type: str) -> Optional[int]:
+        """Finds any existing sensor of the given type to use as a clone source."""
+        # Using filter_sensortype to find a candidate
         try:
-            # addsensor3 returns JSON with objid
-            return int(json.loads(resp).get("objid"))
-        except (ValueError, TypeError, KeyError):
-            # Fallback if text returned
-            logger.warning("Could not parse ID from creation response: %s", resp)
-            return 0
+            data = self._req("GET", "/api/table.json", params={
+                "content": "sensors",
+                "filter_sensortype": sensor_type,
+                "columns": "objid,sensortype,name",
+                "count": 1,
+                "output": "json"
+            })
+            sensors = data.get("sensors", [])
+            if sensors:
+                logger.debug(f"Found template sensor for '{sensor_type}': {sensors[0]['name']} (ID: {sensors[0]['objid']})")
+                return sensors[0].get("objid")
+        except Exception as e:
+            logger.warning(f"Could not find template for {sensor_type}: {e}")
+        return None
+
+    def clone_sensor(self, source_id: int, target_device_id: int, new_name: str) -> Optional[int]:
+        """Clones a source sensor to the target device with a new name. Returns new ID if successful."""
+        try:
+            # 1. Perform the clone
+            self._req("GET", "/api/duplicateobject.htm", params={
+                "id": source_id,
+                "targetid": target_device_id,
+                "name": new_name
+            })
+            
+            # 2. PRTG doesn't return the ID, so we must find it.
+            # We search the target device for the sensor with the specific name.
+            # Retry a few times as creation might be async
+            for _ in range(5):
+                time.sleep(1) # Wait for creation
+                sensors = self.list_sensors(target_device_id)
+                for s in sensors:
+                    if s.get("name") == new_name:
+                        return s.get("objid")
+            
+            logger.error(f"Cloned sensor '{new_name}' was not found on device {target_device_id} after retries.")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to clone sensor '{new_name}': {e}")
+            return None
 
     def pause_sensor(self, sensor_id: int, msg: str):
         """Pauses a sensor with a message."""
@@ -367,12 +406,8 @@ class PRTGClient:
 
     def set_dependency(self, device_id: int, sensor_id: int):
         """Sets the device dependency to a specific sensor."""
-        self._req("POST", "/api/setobjectproperty.htm", params={
-            "id": device_id, "name": "dependencytype", "value": 1
-        })
-        self._req("POST", "/api/setobjectproperty.htm", params={
-            "id": device_id, "name": "dependency", "value": sensor_id
-        })
+        self.set_property(device_id, "dependencytype", 1)
+        self.set_property(device_id, "dependency", sensor_id)
 
     def add_device(self, group_id: int, name: str, host: str) -> int:
         resp = self._req("POST", "/api/adddevice.htm", params={
@@ -415,15 +450,25 @@ async def ensure_core_sensors(client: PRTGClient, device_id: int, sensors: List[
         if not found:
             name = key.replace("_", " ").upper()
             if dry_run:
-                logger.info(f"[DRY-RUN] Would create {name}")
+                logger.info(f"[DRY-RUN] Would clone/create {name}")
                 if key == "ping": ping_id = 99999
             else:
                 logger.info(f"Creating missing {name} sensor...")
                 try:
-                    new_id = client.add_sensor(device_id, prtg_type, {"name": name})
-                    result.foundational_sensors_created.append(name)
-                    if key == "ping": ping_id = new_id
-                    await asyncio.sleep(1) # Rate limit safety
+                    # 1. Find Template
+                    template_id = client.find_template_sensor(prtg_type)
+                    if not template_id:
+                        raise Exception(f"No existing sensor of type '{prtg_type}' found to use as template.")
+                    
+                    # 2. Clone
+                    new_id = client.clone_sensor(template_id, device_id, name)
+                    
+                    if new_id:
+                        result.foundational_sensors_created.append(name)
+                        if key == "ping": ping_id = new_id
+                    else:
+                        raise Exception("Clone operation failed to return a new ID.")
+                        
                 except Exception as e:
                     result.errors.append(f"Failed to create {name}: {e}")
 
@@ -462,18 +507,25 @@ def process_traffic_sensors(client: PRTGClient, device_id: int, interfaces: List
             logger.info(f"[DRY-RUN] Would create sensor: {sensor_name} (ifIndex {idx})")
         else:
             try:
-                # Payload for snmptraffic
-                # 'interfacenumber' is the key param for OID lookup
-                payload = {
-                    "name": sensor_name,
-                    "interfacenumber": idx,
-                    "tags": "bandwidth_sensor automated"
-                }
-                new_id = client.add_sensor(device_id, "snmptraffic", payload)
+                # 1. Find Template for Traffic
+                template_id = client.find_template_sensor("snmptraffic")
+                if not template_id:
+                     raise Exception("No existing SNMP Traffic sensor found to use as template.")
+
+                # 2. Clone Sensor
+                new_id = client.clone_sensor(template_id, device_id, sensor_name)
+                
                 if new_id:
+                    # 3. Configure Interface
+                    client.set_property(new_id, "interfacenumber", idx)
+                    client.set_property(new_id, "tags", "bandwidth_sensor automated")
+                    
                     created_ids.append(new_id)
                     result.traffic_sensors_created += 1
                     logger.info(f"Created: {sensor_name}")
+                else:
+                     result.errors.append(f"Failed to clone sensor: {sensor_name}")
+
             except Exception as e:
                 result.errors.append(f"Failed to create {sensor_name}: {e}")
 
