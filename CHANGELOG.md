@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1] - 2026-01-19
+
+### Changed
+- **Code Refactoring**: Major refactor of `prtg_manager.py` to improve code quality and maintainability.
+- **Linting**: Fixed all pylint issues to achieve a score > 9.0 (Standardized formatting, fixed line lengths, optimized imports).
+- **Architecture**: Split `main()` into modular functions (`parse_arguments`, `resolve_targets`, `process_device`).
+
 ## [1.2.0] - 2026-01-19
 
 ### Added

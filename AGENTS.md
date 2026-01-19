@@ -2,6 +2,15 @@
 
 This file contains instructions for AI agents working on this project.
 
+## Project Context & Critical Constraints
+
+> [!IMPORTANT]
+> **Do NOT refactor the Sensor Creation Logic** to use standard creation endpoints.
+> - **addsensor3.htm** does not work via API.
+> - **PRTG API v1** cannot create sensors from scratch.
+> - **PRTG API v2** is not supported on Hosted Monitor.
+> **ALWAYS** use the `duplicateobject.htm` (Clone) strategy.
+
 ## Versioning & Documentation Rules
 
 1.  **Always Update Changelog**: When making code changes, you MUST update `CHANGELOG.md`.
@@ -22,3 +31,17 @@ This file contains instructions for AI agents working on this project.
 2.  **Add Tests**: Whenever writing logic, creating unit tests (e.g., `unittest` or `pytest`) or verification scripts is mandatory.
 3.  **Run Before Push**: You must run the tests and verify the output matches expectations before pushing any code.
 4.  **User Review First**: NEVER push changes to the remote repository without asking the user to review the changes first. Use `notify_user` to request approval.
+
+## Code Quality & Standards
+
+1.  **Linting**: Run `pylint` on changed files. **Compliance is mandatory.** Fix errors to maintain a high score (> 9.0).
+2.  **Dependencies**: If you add a new import, immediately update `requirements.txt`.
+3.  **Type Hints**: Enforce strict type hinting for all new functions.
+
+## Commit Standards
+
+Use [Conventional Commits](https://www.conventionalcommits.org/):
+-   `feat: ...` for new features
+-   `fix: ...` for bug fixes
+-   `docs: ...` for documentation
+-   `chore: ...` for maintenance/refactoring

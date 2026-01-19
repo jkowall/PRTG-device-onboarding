@@ -19,10 +19,10 @@ PRTG Device Onboarding Automation Script (Hybrid Mode)
 
 Purpose:
     Onboards devices to PRTG with strict interface filtering (Physical + Admin Up).
-    
-    CRITICAL FEATURE: This script performs a LOCAL SNMP SCAN against the device 
-    instead of relying on PRTG's auto-discovery data. This bypasses the 
-    "PRTG not updating descriptions" bug by forcing the correct name/alias 
+
+    CRITICAL FEATURE: This script performs a LOCAL SNMP SCAN against the device
+    instead of relying on PRTG's auto-discovery data. This bypasses the
+    "PRTG not updating descriptions" bug by forcing the correct name/alias
     at the time of sensor creation.
 
 Workflows:
@@ -41,16 +41,16 @@ Workflows:
 Usage:
     python prtg_onboarding.py existing 1234 5678 --dry-run
     python prtg_onboarding.py new 100 "Core Switch" 10.10.10.1
- 
+
 Requirements:
     pip install requests pysnmp
- 
+
 Hosted Monitor (PPHM) Notes:
     - When using PRTG Hosted Monitor, you MUST run this script from a location
-      with local network access to your devices (e.g., behind a VPN or on a 
+      with local network access to your devices (e.g., behind a VPN or on a
       local server).
-    - The 'group_id' provided for new devices MUST belong to a REMOTE PROBE 
-      installed on your local network. Do not add local devices to the 
+    - The 'group_id' provided for new devices MUST belong to a REMOTE PROBE
+      installed on your local network. Do not add local devices to the
       "Hosted Probe" (Cloud), as it cannot reach private RFC1918 addresses.
 """
 from __future__ import annotations
@@ -61,8 +61,11 @@ import logging
 import os
 import sys
 
-__version__ = "1.2.0"
+# Standardize version
 
+
+import subprocess
+import importlib.util
 import time
 import asyncio
 import getpass
@@ -70,21 +73,18 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import ipaddress
 
-import subprocess
-import importlib.util
-
 def check_and_install_packages():
     """Checks for required packages and installs them if missing."""
     required_packages = {
         "requests": "requests",
         "pysnmp": "pysnmp>=7.1.22"
     }
-    
+
     missing = []
     for package, install_name in required_packages.items():
         if importlib.util.find_spec(package) is None:
             missing.append(install_name)
-    
+
     if missing:
         print(f"Missing required packages: {', '.join(missing)}")
         print("Attempting to auto-install...")
@@ -115,6 +115,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+__version__ = "1.2.1"
+
 # --- Constants ---
 
 # IANA Interface Types (Physical)
@@ -124,7 +126,9 @@ PHYSICAL_IF_TYPES = {
     62,   # fastEther
     117,  # gigabitEthernet
     161,  # ieee8023adLag
-    53,   # propVirtual (often used for VLANs/Subinterfaces, remove if strictly physical ports desired)
+    # propVirtual (often used for VLANs/Subinterfaces,
+    # remove if strictly physical ports desired)
+    53,
 }
 
 # PRTG Sensor Types
@@ -157,13 +161,19 @@ class Config:
     request_timeout: int = 60
 
     @staticmethod
-    def get_with_prompt(arg_val: Optional[str], env_var: str, prompt: str, is_password: bool = False, required: bool = True) -> Optional[str]:
+    def get_with_prompt(
+        arg_val: Optional[str],
+        env_var: str,
+        prompt: str,
+        is_password: bool = False,
+        required: bool = True
+    ) -> Optional[str]:
         """Helper to get config value from CLI, Env, or Prompt."""
         if arg_val:
             return arg_val
         if env_var in os.environ:
             return os.environ[env_var]
-        
+
         if not required:
             return None
 
@@ -175,19 +185,36 @@ class Config:
     @staticmethod
     def from_args(args: argparse.Namespace) -> "Config":
         """Loads configuration from CLI args, Env, or interactive prompt."""
-        base_url = Config.get_with_prompt(args.url, "PRTG_BASE_URL", "PRTG Base URL (e.g. https://xxxx.my-prtg.com)")
-        
+        base_url = Config.get_with_prompt(
+            args.url,
+            "PRTG_BASE_URL",
+            "PRTG Base URL (e.g. https://xxxx.my-prtg.com)"
+        )
+
         # Check for API Token first (modern approach)
-        api_token = Config.get_with_prompt(args.api_token, "PRTG_API_TOKEN", "PRTG API Token (leave blank for User/Passhash)", is_password=True, required=False)
-        
+        api_token = Config.get_with_prompt(
+            args.api_token,
+            "PRTG_API_TOKEN",
+            "PRTG API Token (leave blank for User/Passhash)",
+            is_password=True,
+            required=False
+        )
+
         username = None
         passhash = None
-        
+
         if not api_token:
             username = Config.get_with_prompt(args.user, "PRTG_USER", "PRTG Username")
-            passhash = Config.get_with_prompt(args.passhash, "PRTG_PASSHASH", "PRTG Passhash/API Key", is_password=True)
+            passhash = Config.get_with_prompt(
+                args.passhash, "PRTG_PASSHASH", "PRTG Passhash/API Key", is_password=True
+            )
 
-        snmp_comm = Config.get_with_prompt(args.snmp_community, "PRTG_SNMP_COMMUNITY", "SNMP Community (default: public)", required=False) or "public"
+        snmp_comm = Config.get_with_prompt(
+            args.snmp_community,
+            "PRTG_SNMP_COMMUNITY",
+            "SNMP Community (default: public)",
+            required=False
+        ) or "public"
 
         return Config(
             base_url=base_url.rstrip("/"),
@@ -227,8 +254,9 @@ class OnboardingResult:
 
 class SNMPScanner:
     """Handles direct SNMP communication with the device."""
-    
+
     def __init__(self, community: str, port: int):
+        """Initialize SNMP Scanner."""
         self.community = community
         self.port = port
         self.snmp_engine = SnmpEngine()
@@ -253,7 +281,7 @@ class SNMPScanner:
             if error_status:
                 logger.warning("SNMP Error: %s", error_status.prettyPrint())
                 break
-            
+
             for var_bind in var_binds:
                 # varBind[0] is OID, varBind[1] is Value
                 # Extract the last part of OID as index
@@ -274,7 +302,7 @@ class SNMPScanner:
         Returns list of dicts: {ifindex, iftype, ifadminstatus, ifname, ifalias}
         """
         logger.info("Starting Local SNMP Scan on %s...", host)
-        
+
         # 1. Critical Filters
         indices = await self._walk_oid(host, OID_IF_INDEX)
         if not indices:
@@ -283,7 +311,7 @@ class SNMPScanner:
 
         admin_statuses = await self._walk_oid(host, OID_IF_ADMIN_STATUS)
         types = await self._walk_oid(host, OID_IF_TYPE)
-        
+
         # 2. Descriptive Data
         names = await self._walk_oid(host, OID_IF_NAME)
         aliases = await self._walk_oid(host, OID_IF_ALIAS)
@@ -292,10 +320,10 @@ class SNMPScanner:
         compiled_interfaces = []
         for idx in indices:
             # PRTG expects 'ifindex', 'ifadminstatus' (1=up, 2=down), 'iftype'
-            
+
             # Fallback logic for Name: ifName (Gi0/1) -> ifDescr (GigabitEthernet0/1) -> "Port X"
             if_name = names.get(idx, descrs.get(idx, f"Port {idx}"))
-            
+
             interface = {
                 'ifindex': idx,
                 'ifadminstatus': int(admin_statuses.get(idx, 2)), # Default to Down
@@ -311,27 +339,30 @@ class SNMPScanner:
 class PRTGClient:
     """Handles PRTG API interactions."""
     def __init__(self, config: Config):
+        """Initialize PRTG Client with config."""
         self.config = config
         self.session = requests.Session()
         self.session.verify = config.verify_ssl
-        
+
         retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
         self.session.mount("https://", HTTPAdapter(max_retries=retry))
         self.session.mount("http://", HTTPAdapter(max_retries=retry))
 
     def _req(self, method: str, path: str, params: Dict = None) -> Any:
         params = params or {}
-        
+
         # Use API Token if available, otherwise fallback to Username/Passhash
         if self.config.api_token:
             params.update({"apitoken": self.config.api_token})
         else:
             params.update({"username": self.config.username, "passhash": self.config.passhash})
-            
+
         url = f"{self.config.base_url}{path}"
-        
+
         try:
-            resp = self.session.request(method, url, params=params, timeout=self.config.request_timeout)
+            resp = self.session.request(
+                method, url, params=params, timeout=self.config.request_timeout
+            )
             resp.raise_for_status()
             # Handle PRTG's quirky JSON responses
             if "application/json" in resp.headers.get("Content-Type", ""):
@@ -399,14 +430,18 @@ class PRTGClient:
             })
             sensors = data.get("sensors", [])
             if sensors:
-                logger.debug(f"Found template sensor for '{sensor_type}': {sensors[0]['name']} (ID: {sensors[0]['objid']})")
+                logger.debug(
+                    "Found template sensor for '%s': %s (ID: %s)",
+                    sensor_type, sensors[0]['name'], sensors[0]['objid']
+                )
                 return sensors[0].get("objid")
         except Exception as e:
-            logger.warning(f"Could not find template for {sensor_type}: {e}")
+            logger.warning("Could not find template for %s: %s", sensor_type, e)
         return None
 
     def clone_sensor(self, source_id: int, target_device_id: int, new_name: str) -> Optional[int]:
-        """Clones a source sensor to the target device with a new name. Returns new ID if successful."""
+        """Clones a source sensor to the target device with a new name.
+        Returns new ID if successful."""
         try:
             # 1. Perform the clone
             self._req("GET", "/api/duplicateobject.htm", params={
@@ -414,7 +449,7 @@ class PRTGClient:
                 "targetid": target_device_id,
                 "name": new_name
             })
-            
+
             # 2. PRTG doesn't return the ID, so we must find it.
             # We search the target device for the sensor with the specific name.
             # Retry a few times as creation might be async
@@ -424,12 +459,15 @@ class PRTGClient:
                 for s in sensors:
                     if s.get("name") == new_name:
                         return s.get("objid")
-            
-            logger.error(f"Cloned sensor '{new_name}' was not found on device {target_device_id} after retries.")
+
+            logger.error(
+                "Cloned sensor '%s' was not found on device %s after retries.",
+                new_name, target_device_id
+            )
             return None
-            
+
         except Exception as e:
-            logger.error(f"Failed to clone sensor '{new_name}': {e}")
+            logger.error("Failed to clone sensor '%s': %s", new_name, e)
             return None
 
     def pause_sensor(self, sensor_id: int, msg: str):
@@ -452,11 +490,17 @@ class PRTGClient:
 
 # --- Logic Functions ---
 
-async def ensure_core_sensors(client: PRTGClient, device_id: int, sensors: List[Dict], result: OnboardingResult, dry_run: bool) -> int:
+async def ensure_core_sensors(
+    client: PRTGClient,
+    device_id: int,
+    sensors: List[Dict],
+    result: OnboardingResult,
+    dry_run: bool
+) -> int:
     """Checks for Ping, CPU, Mem, Uptime. Returns Ping ID."""
     # existing_types = {s.get("sensortype"): s.get("objid") for s in sensors} # Unused
     ping_id = None
-    
+
     # Check Ping specifically (handle variations like 'ping' or 'ping_v2')
     for s in sensors:
         if "ping" in s.get("sensortype", ""):
@@ -478,29 +522,29 @@ async def ensure_core_sensors(client: PRTGClient, device_id: int, sensors: List[
             if prtg_type in s.get("sensortype", ""):
                 found = True
                 break
-        
+
         if not found:
             name = key.replace("_", " ").upper()
             if dry_run:
-                logger.info(f"[DRY-RUN] Would clone/create {name}")
+                logger.info("[DRY-RUN] Would clone/create %s", name)
                 if key == "ping": ping_id = 99999
             else:
-                logger.info(f"Creating missing {name} sensor...")
+                logger.info("Creating missing %s sensor...", name)
                 try:
                     # 1. Find Template
                     template_id = client.find_template_sensor(prtg_type)
                     if not template_id:
                         raise Exception(f"No existing sensor of type '{prtg_type}' found to use as template.")
-                    
+
                     # 2. Clone
                     new_id = client.clone_sensor(template_id, device_id, name)
-                    
+
                     if new_id:
                         result.foundational_sensors_created.append(name)
                         if key == "ping": ping_id = new_id
                     else:
                         raise Exception("Clone operation failed to return a new ID.")
-                        
+
                 except Exception as e:
                     result.errors.append(f"Failed to create {name}: {e}")
 
@@ -509,7 +553,7 @@ async def ensure_core_sensors(client: PRTGClient, device_id: int, sensors: List[
 def process_traffic_sensors(client: PRTGClient, device_id: int, interfaces: List[Dict], sensors: List[Dict], result: OnboardingResult, dry_run: bool) -> List[int]:
     """Creates traffic sensors for eligible interfaces."""
     created_ids = []
-    
+
     # 1. Identify existing ifIndexes to avoid duplicates
     # existing_indices = set() # Unused
     for s in sensors:
@@ -526,17 +570,17 @@ def process_traffic_sensors(client: PRTGClient, device_id: int, interfaces: List
             continue
         if iface['iftype'] not in PHYSICAL_IF_TYPES:
             continue
-        
+
         result.interfaces_eligible += 1
-        
+
         # Naming Logic: "Traffic [Alias]" or "Traffic [Name]"
         # This solves the user's "Description" issue
         alias = iface.get('ifalias', '').strip()
         name_part = alias if alias else iface.get('ifname', f'Port {idx}')
         sensor_name = f"Traffic {name_part}"
-        
+
         if dry_run:
-            logger.info(f"[DRY-RUN] Would create sensor: {sensor_name} (ifIndex {idx})")
+            logger.info("[DRY-RUN] Would create sensor: %s (ifIndex %s)", sensor_name, idx)
         else:
             try:
                 # 1. Find Template for Traffic
@@ -546,15 +590,15 @@ def process_traffic_sensors(client: PRTGClient, device_id: int, interfaces: List
 
                 # 2. Clone Sensor
                 new_id = client.clone_sensor(template_id, device_id, sensor_name)
-                
+
                 if new_id:
                     # 3. Configure Interface
                     client.set_property(new_id, "interfacenumber", idx)
                     client.set_property(new_id, "tags", "bandwidth_sensor automated")
-                    
+
                     created_ids.append(new_id)
                     result.traffic_sensors_created += 1
-                    logger.info(f"Created: {sensor_name}")
+                    logger.info("Created: %s", sensor_name)
                 else:
                      result.errors.append(f"Failed to clone sensor: {sensor_name}")
 
@@ -565,9 +609,10 @@ def process_traffic_sensors(client: PRTGClient, device_id: int, interfaces: List
 
 # --- Main Execution ---
 
-async def main():
+def parse_arguments():
+    """Parses command line arguments."""
     parser = argparse.ArgumentParser(description="PRTG Onboarding (Hybrid Mode)")
-    
+
     # Global Config Arguments
     parser.add_argument("--url", help="PRTG Base URL")
     parser.add_argument("--api-token", help="PRTG API Token (v21.1+)")
@@ -589,15 +634,12 @@ async def main():
     cmd_new.add_argument("host", help="IP/Hostname")
     cmd_new.add_argument("--dry-run", action="store_true")
 
-    args = parser.parse_args()
-    config = Config.from_args(args)
-    
-    prtg = PRTGClient(config)
-    snmp = SNMPScanner(config.snmp_community, config.snmp_port)
+    return parser.parse_args()
 
-    # Determine targets
+async def resolve_targets(args: argparse.Namespace, prtg: PRTGClient) -> List[tuple]:
+    """Resolves target devices based on the command mode."""
     targets = [] # List of (id, ip, is_new)
-    
+
     if args.command == "existing":
         for did in args.device_ids:
             ip = prtg.get_device_host(did)
@@ -619,7 +661,7 @@ async def main():
                     try:
                         ip_obj = ipaddress.ip_address(args.host)
                         if ip_obj.is_private:
-                            logger.warning(f"!!! CAUTION !!!")
+                            logger.warning("!!! CAUTION !!!")
                             logger.warning(
                                 "You are adding a device with a PRIVATE IP (%s) to the '%s'.",
                                 args.host, probe_name
@@ -633,60 +675,80 @@ async def main():
                             logger.warning("Waiting 10 seconds. Press Ctrl+C to cancel...")
                             await asyncio.sleep(10)
                     except ValueError:
-                        # Host might be a DNS name, skip check or try resolve (skipping for now)
+                        # Host might be a DNS name, skip check or try resolve
                         pass
             except Exception as e:
-                logger.warning(f"Could not verify Probe type: {e}")
+                logger.warning("Could not verify Probe type: %s", e)
 
             try:
                 did = prtg.add_device(args.group_id, args.name, args.host)
-                logger.info(f"Device created with ID {did}")
+                logger.info("Device created with ID %s", did)
                 targets.append((did, args.host, True))
                 await asyncio.sleep(30) # Wait for PRTG internal commit
             except Exception as e:
-                logger.error(f"Fatal: {e}")
+                logger.error("Fatal: %s", e)
                 sys.exit(1)
+
+    return targets
+
+async def process_device(
+    device_id: int,
+    device_ip: str,
+    is_new: bool,
+    prtg: PRTGClient,
+    snmp: SNMPScanner,
+    dry_run: bool
+):
+    """Orchestrates the onboarding process for a single device."""
+    result = OnboardingResult(device_id, device_ip)
+
+    # 1. Local SNMP Scan
+    interfaces = await snmp.scan_interfaces(device_ip)
+    result.interfaces_found = len(interfaces)
+
+    if not interfaces:
+        logger.error("Skipping %s - SNMP Scan failed.", device_ip)
+        result.errors.append("SNMP Scan Failed")
+        result.print_summary()
+        return
+
+    # 2. Get Current State
+    current_sensors = [] if dry_run and is_new else prtg.list_sensors(device_id)
+
+    # 3. Create Core Sensors
+    ping_id = await ensure_core_sensors(prtg, device_id, current_sensors, result, dry_run)
+
+    # 4. Create Traffic Sensors
+    new_traffic_ids = process_traffic_sensors(prtg, device_id, interfaces, current_sensors, result, dry_run)
+
+    # 5. Set Dependencies
+    if ping_id and not dry_run:
+        prtg.set_dependency(device_id, ping_id)
+        result.dependency_set = True
+
+    # 6. Pause Legacy (Existing Mode Only)
+    if not is_new and not dry_run:
+        for s in current_sensors:
+            if "traffic" in s.get("sensortype", "") and s.get("objid") not in new_traffic_ids:
+                if s.get("status_raw") != 7: # 7 is paused
+                    prtg.pause_sensor(s['objid'], "Paused by Automation (Legacy)")
+                    result.legacy_sensors_paused += 1
+
+    result.print_summary()
+
+async def main():
+    args = parse_arguments()
+    config = Config.from_args(args)
+
+    prtg = PRTGClient(config)
+    snmp = SNMPScanner(config.snmp_community, config.snmp_port)
+
+    # Determine targets
+    targets = await resolve_targets(args, prtg)
 
     # Process Targets
     for device_id, device_ip, is_new in targets:
-        result = OnboardingResult(device_id, device_ip)
-        
-        # 1. Local SNMP Scan (The Core Fix)
-        interfaces = await snmp.scan_interfaces(device_ip)
-        result.interfaces_found = len(interfaces)
-        
-        if not interfaces:
-            logger.error(f"Skipping {device_ip} - SNMP Scan failed.")
-            result.errors.append("SNMP Scan Failed")
-            result.print_summary()
-            continue
-
-        # 2. Get Current State
-        current_sensors = [] if args.dry_run and is_new else prtg.list_sensors(device_id)
-
-        # 3. Create Core Sensors
-        ping_id = await ensure_core_sensors(prtg, device_id, current_sensors, result, args.dry_run)
-
-        # 4. Create Traffic Sensors
-        new_traffic_ids = process_traffic_sensors(prtg, device_id, interfaces, current_sensors, result, args.dry_run)
-
-        # 5. Set Dependencies
-        if ping_id and not args.dry_run:
-            prtg.set_dependency(device_id, ping_id)
-            result.dependency_set = True
-
-        # 6. Pause Legacy (Existing Mode Only)
-        if not is_new and not args.dry_run:
-            for s in current_sensors:
-                if "traffic" in s.get("sensortype", "") and s.get("objid") not in new_traffic_ids:
-                    # Don't pause what we just created (safety check)
-                    # Note: new_traffic_ids might be empty if we rely on PRTG async
-                    # But generally we want to pause OLD ones.
-                    if s.get("status_raw") != 7: # 7 is paused
-                        prtg.pause_sensor(s['objid'], "Paused by Automation (Legacy)")
-                        result.legacy_sensors_paused += 1
-
-        result.print_summary()
+        await process_device(device_id, device_ip, is_new, prtg, snmp, args.dry_run)
 
 if __name__ == "__main__":
     asyncio.run(main())
