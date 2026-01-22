@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.5.0] - 2026-01-22
+
+### Added
+- **Sensor Cleanup Option**: Introduced `--cleanup` flag and `cleanup_legacy` configuration to permanently delete old sensors instead of pausing them.
+- **Improved API Support**: Added `delete_object` capability to the PRTG API client.
+
+### Fixed
+- **Legacy Identification Logic**: Refactored traffic sensor management to keep valid existing sensors active. Previously, the script would pause any existing sensor not "newly created" in the current run, even if its configuration was correct.
+
 ## [1.4.0] - 2026-01-22
 
 ### Added

@@ -8,7 +8,7 @@ This script automates the onboarding and updating of devices in PRTG.
 - **Hybrid Scanning**: Fetches device details from PRTG but scans interfaces via local SNMP.
 - **Strict Filtering**: Only creates sensors for interfaces that are **Physical** and **Administratively Up**.
 - **Auto-Dependency**: Automatically sets the Device dependency to the Ping sensor.
-- **Legacy Cleanup**: In `existing` mode, pauses old traffic sensors to prevent duplicates.
+- **Legacy Cleanup**: In `existing` mode, pauses or **deletes** old traffic sensors to prevent duplicates.
 - **Bulk Support**: Can process multiple existing devices in one run.
 
 ## Prerequisites
@@ -39,6 +39,7 @@ base_url: "https://your-prtg.com"
 api_token: "YOUR_TOKEN"
 snmp_community: "public"
 port_name_template: "([ifname]) [ifalias]"
+cleanup_legacy: false
 ```
 
 ### Command Line Flags
@@ -51,6 +52,7 @@ port_name_template: "([ifname]) [ifalias]"
 | `--snmp-community` | SNMP Community string |
 | `--config` | Path to config file (default: `config.yaml`) |
 | `--port-name-template`| Custom naming template (e.g. `([port]) [ifalias]`) |
+| `--cleanup` | Delete legacy sensors instead of pausing (Existing mode) |
 
 ### Environment Variables
 
@@ -63,6 +65,7 @@ port_name_template: "([ifname]) [ifalias]"
 | `PRTG_SNMP_COMMUNITY` | SNMP Community String (default: `public`) | No |
 | `PRTG_PORT_NAME_TEMPLATE`| Custom port naming template | No |
 | `PRTG_VERIFY_SSL` | Verify SSL Certificates (`true`/`false`) | No |
+| `PRTG_CLEANUP_LEGACY` | Cleanup legacy sensors (`true`/`false`) | No |
 
 *\*You must provide either an API Token OR a Username + Passhash combo.*
 

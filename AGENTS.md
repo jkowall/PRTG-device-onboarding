@@ -12,6 +12,11 @@ This file contains instructions for AI agents working on this project.
 > **ALWAYS** use the `duplicateobject.htm` (Clone) strategy.
 > **MANDATORY**: Always check if a sensor name already exists on a device before creating a duplicate.
 
+## Cleanup & Safety
+
+1.  **Cleanup Strategy**: Always default to `pause` instead of `delete` for legacy sensors. Only delete if explicitly requested via `--cleanup` or config.
+2.  **Import Resilience**: All non-standard library imports (`requests`, `pysnmp`, `yaml`) MUST be placed after the `check_and_install_packages()` call to ensure the auto-installer can run before module errors occur.
+
 ## Naming & Discovery Logic
 
 1.  **Filter Parameter**: When searching for sensors via `table.json`, ALWAYS use `filter_type` instead of `filter_sensortype`.

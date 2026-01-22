@@ -58,6 +58,7 @@ Hosted Monitor (PPHM) Notes:
 """
 from __future__ import annotations
 
+# Standard library imports first
 import argparse
 import json
 import logging
@@ -71,14 +72,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import ipaddress
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from pysnmp.hlapi.v3arch import (  # pylint: disable=no-name-in-module
-    CommunityData, ContextData, ObjectIdentity, ObjectType,
-    SnmpEngine, UdpTransportTarget, walk_cmd
-)
-
+# We will check and install packages before importing non-standard once
 def check_and_install_packages():
     """Checks for required packages and installs them if missing."""
     required_packages = {
@@ -96,12 +90,31 @@ def check_and_install_packages():
         print(f"Missing required packages: {', '.join(missing)}")
         print("Attempting to auto-install...")
         try:
+            # We use --break-system-packages if we are in an externally managed environment
+            # but only if absolutely necessary. Actually, better to just try.
+            # If it fails, the user will see why.
             subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
             print("Installation successful. Continuing...")
         except subprocess.CalledProcessError as e:
-            print(f"Failed to install packages: {e}")
-            print("Please run: pip install -r requirements.txt")
-            sys.exit(1)
+            # Try again with --break-system-packages if it fails (often needed in modern Linux)
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages"] + missing)
+                print("Installation successful (with --break-system-packages). Continuing...")
+            except subprocess.CalledProcessError:
+                print(f"Failed to install packages: {e}")
+                print("Please run: pip install -r requirements.txt")
+                sys.exit(1)
+
+check_and_install_packages()
+
+# Now we can safely import non-standard packages
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from pysnmp.hlapi.v3arch import (  # pylint: disable=no-name-in-module
+    CommunityData, ContextData, ObjectIdentity, ObjectType,
+    SnmpEngine, UdpTransportTarget, walk_cmd
+)
 
 # Required checks performed at start
 
@@ -143,7 +156,7 @@ def setup_logging(debug: bool = False):
 setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 # --- Constants ---
 
@@ -189,6 +202,7 @@ class Config:
     verify_ssl: bool = True
     request_timeout: int = 60
     port_name_template: Optional[str] = None
+    cleanup_legacy: bool = False
 
     @staticmethod
     def get_with_prompt(
@@ -274,7 +288,12 @@ class Config:
             api_token=api_token,
             snmp_community=snmp_comm,
             verify_ssl=os.environ.get("PRTG_VERIFY_SSL", "true").lower() != "false",
-            port_name_template=port_template
+            port_name_template=port_template,
+            cleanup_legacy=get_val(
+                getattr(args, 'cleanup', None),
+                "PRTG_CLEANUP_LEGACY", "cleanup_legacy",
+                "Cleanup legacy sensors (True/False)", req=False
+            ) in (True, "True", "true", "1")
         )
 
 @dataclass
@@ -572,6 +591,10 @@ class PRTGClient:
         self.set_property(device_id, "dependencytype", 1)
         self.set_property(device_id, "dependency", sensor_id)
 
+    def delete_object(self, object_id: int):
+        """Permanently deletes an object from PRTG."""
+        self._req("GET", "/api/deleteobject.htm", params={"id": object_id, "approve": 1})
+
     def add_device(self, group_id: int, name: str, host: str) -> int:
         """Adds a new device to PRTG."""
         resp = self._req("POST", "/api/adddevice.htm", params={
@@ -667,11 +690,11 @@ async def process_traffic_sensors(
     client: PRTGClient, device_id: int, interfaces: List[Dict],
     sensors: List[Dict], result: OnboardingResult, config: Config, dry_run: bool
 ) -> List[int]:
-    """Creates traffic sensors for eligible interfaces."""
-    created_ids = []
+    """Creates traffic sensors for eligible interfaces. Returns list of all relevant sensor IDs."""
+    relevant_ids = []
 
-    # 1. Identify existing sensor names to avoid duplicates
-    existing_names = {s.get("name") for s in sensors}
+    # 1. Identify existing sensor names and IDs
+    existing_sensors = {s.get("name"): s.get("objid") for s in sensors}
 
     for iface in interfaces:
         idx = iface['ifindex']
@@ -697,8 +720,9 @@ async def process_traffic_sensors(
         sensor_name = ' '.join(sensor_name.split())
         
         # 3. Duplicate Check
-        if sensor_name in existing_names:
-            logger.debug("Skipping duplicate sensor: %s", sensor_name)
+        if sensor_name in existing_sensors:
+            logger.debug("Existing sensor matches name: %s", sensor_name)
+            relevant_ids.append(existing_sensors[sensor_name])
             continue
 
         if dry_run:
@@ -725,7 +749,7 @@ async def process_traffic_sensors(
                     client.set_property(new_id, "interfacenumber", idx)
                     client.set_property(new_id, "tags", "bandwidth_sensor automated")
 
-                    created_ids.append(new_id)
+                    relevant_ids.append(new_id)
                     result.traffic_sensors_created += 1
                     logger.info("Created: %s (ID: %s)", sensor_name, new_id)
                 else:
@@ -736,7 +760,7 @@ async def process_traffic_sensors(
                 result.errors.append(f"Failed to create {sensor_name}: {error_msg}")
                 logger.error("Error creating traffic sensor %s: %s", sensor_name, error_msg)
 
-    return created_ids
+    return relevant_ids
 
 # --- Main Execution ---
 
@@ -762,6 +786,7 @@ def parse_arguments():
     cmd_existing = subparsers.add_parser("existing", help="Process existing PRTG devices")
     cmd_existing.add_argument("device_ids", nargs="+", type=int, help="Device IDs to update")
     cmd_existing.add_argument("--dry-run", action="store_true")
+    cmd_existing.add_argument("--cleanup", action="store_true", help="Delete legacy sensors instead of pausing")
 
     # Mode: New
     cmd_new = subparsers.add_parser("new", help="Add and onboard a new device")
@@ -769,6 +794,7 @@ def parse_arguments():
     cmd_new.add_argument("name", help="Device Name")
     cmd_new.add_argument("host", help="IP/Hostname")
     cmd_new.add_argument("--dry-run", action="store_true")
+    cmd_new.add_argument("--cleanup", action="store_true", help="Delete legacy sensors instead of pausing")
 
     return parser.parse_args()
 
@@ -868,7 +894,7 @@ async def process_device(
     ping_id = await ensure_core_sensors(prtg, device_id, current_sensors, result, dry_run)
 
     # 4. Create Traffic Sensors
-    new_traffic_ids = await process_traffic_sensors(
+    relevant_traffic_ids = await process_traffic_sensors(
         prtg, device_id, interfaces, current_sensors, result, config, dry_run
     )
 
@@ -877,19 +903,32 @@ async def process_device(
         prtg.set_dependency(device_id, ping_id)
         result.dependency_set = True
 
-    # 6. Pause Legacy (Existing Mode Only)
-    if not is_new and not dry_run:
+    # 6. Clean up Legacy (Existing Mode Only)
+    if not is_new:
         for s in current_sensors:
-            if "traffic" in s.get("sensortype", "") and s.get("objid") not in new_traffic_ids:
-                if s.get("status_raw") != 7: # 7 is paused
-                    prtg.pause_sensor(s['objid'], "Paused by Automation (Legacy)")
-                    result.legacy_sensors_paused += 1
+            if "traffic" in s.get("sensortype", "") and s.get("objid") not in relevant_traffic_ids:
+                if config.cleanup_legacy:
+                    if dry_run:
+                        logger.info("[DRY-RUN] Would delete legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
+                    else:
+                        logger.info("Deleting legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
+                        try:
+                            prtg.delete_object(s['objid'])
+                        except Exception as e:
+                            logger.error("Failed to delete sensor %s: %s", s.get("objid"), e)
+                else:
+                    if s.get("status_raw") != 7: # 7 is paused
+                        if dry_run:
+                            logger.info("[DRY-RUN] Would pause legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
+                        else:
+                            prtg.pause_sensor(s['objid'], "Paused by Automation (Legacy)")
+                            result.legacy_sensors_paused += 1
+                            logger.info("Paused legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
 
     result.print_summary()
 
 async def main():
     """Main entry point for the script."""
-    check_and_install_packages()
     args = parse_arguments()
     if args.debug:
         setup_logging(debug=True)
