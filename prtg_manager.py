@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2025 Jonah Kowall
+# Copyright 2026 Jonah Kowall
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,8 +39,12 @@ Workflows:
        - Pauses legacy traffic sensors.
 
 Usage:
-    python prtg_onboarding.py existing 1234 5678 --dry-run
-    python prtg_onboarding.py new 100 "Core Switch" 10.10.10.1
+    python prtg_manager.py [--debug] [--url URL] [--api-token TOKEN] [--user USER] [--passhash HASH] new <GROUP_ID> "<NAME>" <HOST> [--dry-run]
+    python prtg_manager.py [--debug] [--url URL] [--api-token TOKEN] existing <DEVICE_ID_1> [DEVICE_ID_2 ...] [--dry-run]
+
+Configuration:
+    Options can be provided via CLI flags, Environment Variables, or Interactive Prompts.
+    Environment Variables: PRTG_BASE_URL, PRTG_API_TOKEN, PRTG_USER, PRTG_PASSHASH, PRTG_SNMP_COMMUNITY.
 
 Requirements:
     pip install requests pysnmp
@@ -60,18 +64,21 @@ import json
 import logging
 import os
 import sys
-
-# Standardize version
-
-
 import subprocess
 import importlib.util
-import time
 import asyncio
 import getpass
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import ipaddress
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from pysnmp.hlapi.v3arch import (  # pylint: disable=no-name-in-module
+    CommunityData, ContextData, ObjectIdentity, ObjectType,
+    SnmpEngine, UdpTransportTarget, walk_cmd
+)
 
 def check_and_install_packages():
     """Checks for required packages and installs them if missing."""
@@ -96,26 +103,47 @@ def check_and_install_packages():
             print("Please run: pip install -r requirements.txt")
             sys.exit(1)
 
-# Run check before imports that might fail
-check_and_install_packages()
+# Required checks performed at start
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from pysnmp.hlapi.v3arch import (  # pylint: disable=no-name-in-module
-    CommunityData, ContextData, ObjectIdentity, ObjectType,
-    SnmpEngine, UdpTransportTarget, walk_cmd
-)
+def setup_logging(debug: bool = False):
+    """Configures logging for the script to both console and a file."""
+    level = logging.DEBUG if debug else logging.INFO
 
-# --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+    # Identify log file name based on script name
+    script_name = os.path.basename(__file__)
+    log_file = os.path.splitext(script_name)[0] + ".log"
+
+    # Formatter
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Console Handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(level)
+
+    # File Handler (Always logs at least INFO, or DEBUG if flag set)
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(level)
+
+    # Root Logger Setup
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # Clear existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 # --- Constants ---
 
@@ -359,17 +387,31 @@ class PRTGClient:
 
         url = f"{self.config.base_url}{path}"
 
+        # Redact credentials for logging
+        log_params = {
+            k: (v if k not in ("username", "passhash", "apitoken") else "****")
+            for k, v in params.items()
+        }
+        logger.debug("API Request: %s %s with params %s", method, url, log_params)
+
         try:
             resp = self.session.request(
                 method, url, params=params, timeout=self.config.request_timeout
             )
+
+            if not resp.ok:
+                # PRTG often returns error messages in the body of a 4xx/5xx response
+                logger.error("API Error Response (%s): %s", resp.status_code, resp.text)
+                # Attach response body to the exception for higher level catch blocks
+                resp.reason = f"{resp.reason} - Body: {resp.text[:200]}"
+
             resp.raise_for_status()
             # Handle PRTG's quirky JSON responses
             if "application/json" in resp.headers.get("Content-Type", ""):
                 return resp.json()
             return resp.text
         except Exception as e:
-            logger.error("API Request Failed (%s): %s", path, e)
+            logger.debug("Exception during request: %s", str(e))
             raise
 
     def get_device_host(self, device_id: int) -> Optional[str]:
@@ -439,7 +481,9 @@ class PRTGClient:
             logger.warning("Could not find template for %s: %s", sensor_type, e)
         return None
 
-    def clone_sensor(self, source_id: int, target_device_id: int, new_name: str) -> Optional[int]:
+    async def clone_sensor(
+        self, source_id: int, target_device_id: int, new_name: str
+    ) -> Optional[int]:
         """Clones a source sensor to the target device with a new name.
         Returns new ID if successful."""
         try:
@@ -454,7 +498,7 @@ class PRTGClient:
             # We search the target device for the sensor with the specific name.
             # Retry a few times as creation might be async
             for _ in range(5):
-                time.sleep(1) # Wait for creation
+                await asyncio.sleep(1) # Wait for creation
                 sensors = self.list_sensors(target_device_id)
                 for s in sensors:
                     if s.get("name") == new_name:
@@ -526,31 +570,48 @@ async def ensure_core_sensors(
         if not found:
             name = key.replace("_", " ").upper()
             if dry_run:
-                logger.info("[DRY-RUN] Would clone/create %s", name)
-                if key == "ping": ping_id = 99999
+                # Preview info for dry-run
+                logger.info(
+                    "[DRY-RUN] Would clone template for %s to create %s sensor.",
+                    prtg_type, name
+                )
+                if key == "ping":
+                    ping_id = 99999
             else:
                 logger.info("Creating missing %s sensor...", name)
                 try:
                     # 1. Find Template
                     template_id = client.find_template_sensor(prtg_type)
                     if not template_id:
-                        raise Exception(f"No existing sensor of type '{prtg_type}' found to use as template.")
+                        raise Exception(
+                            f"No existing sensor of type '{prtg_type}' "
+                            "found to use as template."
+                        )
 
                     # 2. Clone
-                    new_id = client.clone_sensor(template_id, device_id, name)
+                    new_id = await client.clone_sensor(template_id, device_id, name)
 
                     if new_id:
                         result.foundational_sensors_created.append(name)
-                        if key == "ping": ping_id = new_id
+                        if key == "ping":
+                            ping_id = new_id
+                        logger.info("Successfully created %s sensor (ID: %s)", name, new_id)
                     else:
                         raise Exception("Clone operation failed to return a new ID.")
 
+                    await asyncio.sleep(1) # Rate limit safety
+
                 except Exception as e:
-                    result.errors.append(f"Failed to create {name}: {e}")
+                    error_msg = str(e)
+                    result.errors.append(f"Failed to create {name}: {error_msg}")
+                    logger.error(f"Error creating {name}: {error_msg}")
 
     return ping_id
 
-def process_traffic_sensors(client: PRTGClient, device_id: int, interfaces: List[Dict], sensors: List[Dict], result: OnboardingResult, dry_run: bool) -> List[int]:
+async def process_traffic_sensors(
+    client: PRTGClient, device_id: int, interfaces: List[Dict],
+    sensors: List[Dict], result: OnboardingResult, dry_run: bool
+) -> List[int]:
     """Creates traffic sensors for eligible interfaces."""
     created_ids = []
 
@@ -580,16 +641,21 @@ def process_traffic_sensors(client: PRTGClient, device_id: int, interfaces: List
         sensor_name = f"Traffic {name_part}"
 
         if dry_run:
-            logger.info("[DRY-RUN] Would create sensor: %s (ifIndex %s)", sensor_name, idx)
+            logger.info(
+                "[DRY-RUN] Would clone template for 'snmptraffic' to create %s (ifIndex %s).",
+                sensor_name, idx
+            )
         else:
             try:
                 # 1. Find Template for Traffic
                 template_id = client.find_template_sensor("snmptraffic")
                 if not template_id:
-                     raise Exception("No existing SNMP Traffic sensor found to use as template.")
+                    raise Exception(
+                        "No existing SNMP Traffic sensor found to use as template."
+                    )
 
                 # 2. Clone Sensor
-                new_id = client.clone_sensor(template_id, device_id, sensor_name)
+                new_id = await client.clone_sensor(template_id, device_id, sensor_name)
 
                 if new_id:
                     # 3. Configure Interface
@@ -598,12 +664,14 @@ def process_traffic_sensors(client: PRTGClient, device_id: int, interfaces: List
 
                     created_ids.append(new_id)
                     result.traffic_sensors_created += 1
-                    logger.info("Created: %s", sensor_name)
+                    logger.info("Created: %s (ID: %s)", sensor_name, new_id)
                 else:
-                     result.errors.append(f"Failed to clone sensor: {sensor_name}")
+                    result.errors.append(f"Failed to clone sensor: {sensor_name}")
 
             except Exception as e:
-                result.errors.append(f"Failed to create {sensor_name}: {e}")
+                error_msg = str(e)
+                result.errors.append(f"Failed to create {sensor_name}: {error_msg}")
+                logger.error(f"Error creating traffic sensor {sensor_name}: {error_msg}")
 
     return created_ids
 
@@ -615,6 +683,7 @@ def parse_arguments():
 
     # Global Config Arguments
     parser.add_argument("--url", help="PRTG Base URL")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--api-token", help="PRTG API Token (v21.1+)")
     parser.add_argument("--user", help="PRTG Username")
     parser.add_argument("--passhash", help="PRTG Passhash/API Key")
@@ -667,7 +736,8 @@ async def resolve_targets(args: argparse.Namespace, prtg: PRTGClient) -> List[tu
                                 args.host, probe_name
                             )
                             logger.warning(
-                                "The Hosted Probe runs in the cloud and cannot reach your local network."
+                                "The Hosted Probe runs in the cloud and "
+                                "cannot reach your local network."
                             )
                             logger.warning(
                                 "Verify you are using a Group ID belonging to a LOCAL REMOTE PROBE."
@@ -719,7 +789,9 @@ async def process_device(
     ping_id = await ensure_core_sensors(prtg, device_id, current_sensors, result, dry_run)
 
     # 4. Create Traffic Sensors
-    new_traffic_ids = process_traffic_sensors(prtg, device_id, interfaces, current_sensors, result, dry_run)
+    new_traffic_ids = await process_traffic_sensors(
+        prtg, device_id, interfaces, current_sensors, result, dry_run
+    )
 
     # 5. Set Dependencies
     if ping_id and not dry_run:
@@ -737,7 +809,13 @@ async def process_device(
     result.print_summary()
 
 async def main():
+    """Main entry point for the script."""
+    check_and_install_packages()
     args = parse_arguments()
+    if args.debug:
+        setup_logging(debug=True)
+        logger.debug("Debug logging enabled")
+
     config = Config.from_args(args)
 
     prtg = PRTGClient(config)

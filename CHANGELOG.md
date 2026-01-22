@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.3.0] - 2026-01-22
+
+### Added
+- **File Logging**: Integrated persistent logging to `prtg_manager.log`.
+- **Debug Mode**: Added `--debug` flag for detailed API diagnostics and error bodies.
+- **Enhanced Dry-Run**: Added exact payload previews for cloning and configuration.
+
+### Changed
+- **Asyncio Support**: Finalized and verified full async orchestration for SNMP and sensor management.
+- **Robust API Client**: Improved `PRTGClient` with better error capture, redaction, and API token support.
+- **CLI Standardized**: Refined argument parsing and interactive fallbacks.
+- **Documentation**: Updated script docstring and README with comprehensive usage examples.
+
+### Fixed
+- **Merge Conflict Resolution**: Successfully merged logical enhancements with refactored async codebase.
+- **Linting Perfection**: Addressed remaining style issues (lazy logging, line lengths, imports).
+- **Concurrency**: Ensured sensor cloning retries are non-blocking using `asyncio.sleep`.
+
+
 ## [1.2.1] - 2026-01-19
 
 ### Changed
