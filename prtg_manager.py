@@ -39,23 +39,22 @@ Workflows:
        - Pauses legacy traffic sensors.
 
 Usage:
-    python prtg_manager.py [--debug] [--url URL] [--api-token TOKEN] [--user USER] [--passhash HASH] new <GROUP_ID> "<NAME>" <HOST> [--dry-run]
-    python prtg_manager.py [--debug] [--url URL] [--api-token TOKEN] existing <DEVICE_ID_1> [DEVICE_ID_2 ...] [--dry-run]
+    python prtg_manager.py [--debug] [--config CONFIG] [--url URL] [--api-token TOKEN] [--port-name-template TEMPLATE]
+                           new <GROUP_ID> "<NAME>" <HOST> [--dry-run]
+    python prtg_manager.py [--debug] [--config CONFIG] [--url URL] [--api-token TOKEN]
+                           existing <DEVICE_ID_1> [DEVICE_ID_2 ...] [--dry-run]
 
 Configuration:
-    Options can be provided via CLI flags, Environment Variables, or Interactive Prompts.
-    Environment Variables: PRTG_BASE_URL, PRTG_API_TOKEN, PRTG_USER, PRTG_PASSHASH, PRTG_SNMP_COMMUNITY.
+    Options are merged in order: CLI Flags > Env Variables > config.yaml > Interactive Prompts.
+    Environment Variables: PRTG_BASE_URL, PRTG_API_TOKEN, PRTG_USER, PRTG_PASSHASH, PRTG_SNMP_COMMUNITY, PRTG_PORT_NAME_TEMPLATE.
 
 Requirements:
-    pip install requests pysnmp
+    pip install requests pysnmp PyYAML
 
 Hosted Monitor (PPHM) Notes:
-    - When using PRTG Hosted Monitor, you MUST run this script from a location
-      with local network access to your devices (e.g., behind a VPN or on a
-      local server).
-    - The 'group_id' provided for new devices MUST belong to a REMOTE PROBE
-      installed on your local network. Do not add local devices to the
-      "Hosted Probe" (Cloud), as it cannot reach private RFC1918 addresses.
+    - When using PRTG Hosted Monitor, you MUST run this script from local network
+      access (e.g., behind a VPN or on a local server).
+    - The 'group_id' provided for new devices MUST belong to a REMOTE PROBE.
 """
 from __future__ import annotations
 
@@ -84,7 +83,8 @@ def check_and_install_packages():
     """Checks for required packages and installs them if missing."""
     required_packages = {
         "requests": "requests",
-        "pysnmp": "pysnmp>=7.1.22"
+        "pysnmp": "pysnmp>=7.1.22",
+        "yaml": "PyYAML"
     }
 
     missing = []
@@ -143,7 +143,7 @@ def setup_logging(debug: bool = False):
 setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 # --- Constants ---
 
@@ -175,6 +175,7 @@ OID_IF_TYPE = '1.3.6.1.2.1.2.2.1.3'
 OID_IF_ADMIN_STATUS = '1.3.6.1.2.1.2.2.1.7'
 OID_IF_ALIAS = '1.3.6.1.2.1.31.1.1.1.18'  # ifXTable alias
 OID_IF_NAME = '1.3.6.1.2.1.31.1.1.1.1'    # ifXTable name (e.g. Gi1/0/1)
+OID_IF_SPEED = '1.3.6.1.2.1.2.2.1.5'      # ifSpeed (bandwidth)
 
 @dataclass
 class Config:
@@ -187,6 +188,7 @@ class Config:
     snmp_port: int = 161
     verify_ssl: bool = True
     request_timeout: int = 60
+    port_name_template: Optional[str] = None
 
     @staticmethod
     def get_with_prompt(
@@ -212,37 +214,58 @@ class Config:
 
     @staticmethod
     def from_args(args: argparse.Namespace) -> "Config":
-        """Loads configuration from CLI args, Env, or interactive prompt."""
-        base_url = Config.get_with_prompt(
-            args.url,
-            "PRTG_BASE_URL",
+        """Loads configuration from YAML, CLI args, Env, or interactive prompt."""
+        yaml_data = {}
+        config_path = getattr(args, 'config', 'config.yaml')
+        if os.path.exists(config_path):
+            try:
+                import yaml  # pylint: disable=import-outside-toplevel
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    yaml_data = yaml.safe_load(f) or {}
+                logger.info("Loaded configuration from %s", config_path)
+            except Exception as e:
+                logger.warning("Could not load config file %s: %s", config_path, e)
+
+        def get_val(cli_val, env_var, yaml_key, prompt_text, is_pwd=False, req=True):
+            # Priority: CLI > Env > YAML > Prompt
+            if cli_val:
+                return cli_val
+            if env_var in os.environ:
+                return os.environ[env_var]
+            if yaml_key in yaml_data:
+                return yaml_data[yaml_key]
+            return Config.get_with_prompt(None, env_var, prompt_text, is_pwd, req)
+
+        base_url = get_val(
+            args.url, "PRTG_BASE_URL", "base_url",
             "PRTG Base URL (e.g. https://xxxx.my-prtg.com)"
         )
 
-        # Check for API Token first (modern approach)
-        api_token = Config.get_with_prompt(
-            args.api_token,
-            "PRTG_API_TOKEN",
+        api_token = get_val(
+            args.api_token, "PRTG_API_TOKEN", "api_token",
             "PRTG API Token (leave blank for User/Passhash)",
-            is_password=True,
-            required=False
+            is_pwd=True, req=False
         )
 
         username = None
         passhash = None
-
         if not api_token:
-            username = Config.get_with_prompt(args.user, "PRTG_USER", "PRTG Username")
-            passhash = Config.get_with_prompt(
-                args.passhash, "PRTG_PASSHASH", "PRTG Passhash/API Key", is_password=True
+            username = get_val(args.user, "PRTG_USER", "username", "PRTG Username")
+            passhash = get_val(
+                args.passhash, "PRTG_PASSHASH", "passhash",
+                "PRTG Passhash/API Key", is_pwd=True
             )
 
-        snmp_comm = Config.get_with_prompt(
-            args.snmp_community,
-            "PRTG_SNMP_COMMUNITY",
-            "SNMP Community (default: public)",
-            required=False
+        snmp_comm = get_val(
+            args.snmp_community, "PRTG_SNMP_COMMUNITY", "snmp_community",
+            "SNMP Community (default: public)", req=False
         ) or "public"
+
+        port_template = get_val(
+            getattr(args, 'port_name_template', None),
+            "PRTG_PORT_NAME_TEMPLATE", "port_name_template",
+            "Port Name Template (optional)", req=False
+        )
 
         return Config(
             base_url=base_url.rstrip("/"),
@@ -251,6 +274,7 @@ class Config:
             api_token=api_token,
             snmp_community=snmp_comm,
             verify_ssl=os.environ.get("PRTG_VERIFY_SSL", "true").lower() != "false",
+            port_name_template=port_template
         )
 
 @dataclass
@@ -344,6 +368,7 @@ class SNMPScanner:
         names = await self._walk_oid(host, OID_IF_NAME)
         aliases = await self._walk_oid(host, OID_IF_ALIAS)
         descrs = await self._walk_oid(host, OID_IF_DESCR)
+        speeds = await self._walk_oid(host, OID_IF_SPEED)
 
         compiled_interfaces = []
         for idx in indices:
@@ -357,7 +382,9 @@ class SNMPScanner:
                 'ifadminstatus': int(admin_statuses.get(idx, 2)), # Default to Down
                 'iftype': int(types.get(idx, 0)),
                 'ifname': if_name,
-                'ifalias': aliases.get(idx, "")
+                'ifalias': aliases.get(idx, ""),
+                'ifdescr': descrs.get(idx, ""),
+                'ifspeed': speeds.get(idx, "")
             }
             compiled_interfaces.append(interface)
 
@@ -408,7 +435,11 @@ class PRTGClient:
             resp.raise_for_status()
             # Handle PRTG's quirky JSON responses
             if "application/json" in resp.headers.get("Content-Type", ""):
-                return resp.json()
+                json_data = resp.json()
+                # Log small JSON bodies for debugging (e.g., empty lists)
+                if len(resp.text) < 500:
+                    logger.debug("API Response Body: %s", resp.text)
+                return json_data
             return resp.text
         except Exception as e:
             logger.debug("Exception during request: %s", str(e))
@@ -459,26 +490,44 @@ class PRTGClient:
             "id": object_id, "name": name, "value": value
         })
 
-    def find_template_sensor(self, sensor_type: str) -> Optional[int]:
-        """Finds any existing sensor of the given type to use as a clone source."""
-        # Using filter_sensortype to find a candidate
+    def get_property(self, object_id: int, name: str) -> Optional[str]:
+        """Fetches a specific property of an object."""
+        # Using /api/getobjectproperty.htm?id=id&name=name
         try:
-            data = self._req("GET", "/api/table.json", params={
-                "content": "sensors",
-                "filter_sensortype": sensor_type,
-                "columns": "objid,sensortype,name",
-                "count": 1,
-                "output": "json"
+            val = self._req("GET", "/api/getobjectstatus.htm", params={
+                "id": object_id, "name": name, "show": "text"
             })
-            sensors = data.get("sensors", [])
-            if sensors:
-                logger.debug(
-                    "Found template sensor for '%s': %s (ID: %s)",
-                    sensor_type, sensors[0]['name'], sensors[0]['objid']
-                )
-                return sensors[0].get("objid")
-        except Exception as e:
-            logger.warning("Could not find template for %s: %s", sensor_type, e)
+            return str(val).strip()
+        except (requests.RequestException, json.JSONDecodeError) as e:
+            logger.debug("Failed to get property %s for %s: %s", name, object_id, e)
+            return None
+
+    def find_template_sensor(self, sensor_types: List[str] | str) -> Optional[int]:
+        """Finds any existing sensor of the given type(s) to use as a clone source."""
+        if isinstance(sensor_types, str):
+            sensor_types = [sensor_types]
+
+        for s_type in sensor_types:
+            try:
+                # Correct param: filter_type (matching column 'type')
+                data = self._req("GET", "/api/table.json", params={
+                    "content": "sensors",
+                    "filter_type": s_type,
+                    "columns": "objid,type,name",
+                    "count": 1,
+                    "output": "json"
+                })
+                sensors = data.get("sensors", [])
+                if sensors:
+                    logger.debug(
+                        "Found template sensor for '%s': %s (ID: %s)",
+                        s_type, sensors[0]['name'], sensors[0]['objid']
+                    )
+                    return sensors[0].get("objid")
+                logger.debug("No template sensor found for type: %s", s_type)
+            except (requests.RequestException, json.JSONDecodeError) as e:
+                logger.warning("Could not find template for %s: %s", s_type, e)
+
         return None
 
     async def clone_sensor(
@@ -510,7 +559,7 @@ class PRTGClient:
             )
             return None
 
-        except Exception as e:
+        except requests.RequestException as e:
             logger.error("Failed to clone sensor '%s': %s", new_name, e)
             return None
 
@@ -524,13 +573,14 @@ class PRTGClient:
         self.set_property(device_id, "dependency", sensor_id)
 
     def add_device(self, group_id: int, name: str, host: str) -> int:
+        """Adds a new device to PRTG."""
         resp = self._req("POST", "/api/adddevice.htm", params={
             "name": name, "host": host, "id": group_id
         })
         try:
             return int(json.loads(resp).get("objid"))
-        except (ValueError, KeyError, TypeError) as e:
-            raise Exception(f"Failed to create device. Response: {resp}") from e
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
+            raise RuntimeError(f"Failed to create device. Response: {resp}") from e
 
 # --- Logic Functions ---
 
@@ -580,11 +630,15 @@ async def ensure_core_sensors(
             else:
                 logger.info("Creating missing %s sensor...", name)
                 try:
-                    # 1. Find Template
-                    template_id = client.find_template_sensor(prtg_type)
+                    # 1. Find Template (Try multiple common types)
+                    type_candidates = [prtg_type]
+                    if prtg_type == "snmpmemory":
+                        type_candidates.append("snmpmem") # Alternative type name
+                    
+                    template_id = client.find_template_sensor(type_candidates)
                     if not template_id:
                         raise Exception(
-                            f"No existing sensor of type '{prtg_type}' "
+                            f"No existing sensor of types {type_candidates} "
                             "found to use as template."
                         )
 
@@ -601,28 +655,23 @@ async def ensure_core_sensors(
 
                     await asyncio.sleep(1) # Rate limit safety
 
-                except Exception as e:
+                except (requests.RequestException, RuntimeError, json.JSONDecodeError) as e:
                     error_msg = str(e)
                     result.errors.append(f"Failed to create {name}: {error_msg}")
-                    logger.error(f"Error creating {name}: {error_msg}")
+                    logger.error("Error creating %s: %s", name, error_msg)
 
     return ping_id
 
+# pylint: disable=too-many-arguments,too-many-locals,too-many-branches
 async def process_traffic_sensors(
     client: PRTGClient, device_id: int, interfaces: List[Dict],
-    sensors: List[Dict], result: OnboardingResult, dry_run: bool
+    sensors: List[Dict], result: OnboardingResult, config: Config, dry_run: bool
 ) -> List[int]:
     """Creates traffic sensors for eligible interfaces."""
     created_ids = []
 
-    # 1. Identify existing ifIndexes to avoid duplicates
-    # existing_indices = set() # Unused
-    for s in sensors:
-        if "traffic" in s.get("sensortype", ""):
-            # Attempt to parse ifIndex from parameter/settings is hard via API table
-            # heuristic: check if name contains ifIndex logic or rely on PRTG dupe check
-            # For robustness, we assume we create new ones and rely on cleanup logic if needed
-            pass
+    # 1. Identify existing sensor names to avoid duplicates
+    existing_names = {s.get("name") for s in sensors}
 
     for iface in interfaces:
         idx = iface['ifindex']
@@ -634,11 +683,23 @@ async def process_traffic_sensors(
 
         result.interfaces_eligible += 1
 
-        # Naming Logic: "Traffic [Alias]" or "Traffic [Name]"
-        # This solves the user's "Description" issue
-        alias = iface.get('ifalias', '').strip()
-        name_part = alias if alias else iface.get('ifname', f'Port {idx}')
-        sensor_name = f"Traffic {name_part}"
+        # 2. Template Interpolation
+        # Placeholders: [port], [ifalias], [ifname], [ifdescr], [ifspeed], [ifsensor]
+        sensor_name = config.port_name_template
+        sensor_name = sensor_name.replace("[port]", f"{idx:03}") # 3-digit padding common in PRTG
+        sensor_name = sensor_name.replace("[ifalias]", iface.get('ifalias', ''))
+        sensor_name = sensor_name.replace("[ifname]", iface.get('ifname', ''))
+        sensor_name = sensor_name.replace("[ifdescr]", iface.get('ifdescr', ''))
+        sensor_name = sensor_name.replace("[ifspeed]", iface.get('ifspeed', ''))
+        sensor_name = sensor_name.replace("[ifsensor]", "SNMP Traffic")
+        
+        # Clean up double spaces or brackets if values were empty
+        sensor_name = ' '.join(sensor_name.split())
+        
+        # 3. Duplicate Check
+        if sensor_name in existing_names:
+            logger.debug("Skipping duplicate sensor: %s", sensor_name)
+            continue
 
         if dry_run:
             logger.info(
@@ -647,11 +708,13 @@ async def process_traffic_sensors(
             )
         else:
             try:
-                # 1. Find Template for Traffic
-                template_id = client.find_template_sensor("snmptraffic")
+                # 1. Find Template for Traffic (Try both 32/64-bit types)
+                type_candidates = ["snmptraffic", "snmptraffic64"]
+                template_id = client.find_template_sensor(type_candidates)
                 if not template_id:
                     raise Exception(
-                        "No existing SNMP Traffic sensor found to use as template."
+                        f"No existing sensor of types {type_candidates} "
+                        "found to use as template."
                     )
 
                 # 2. Clone Sensor
@@ -671,7 +734,7 @@ async def process_traffic_sensors(
             except Exception as e:
                 error_msg = str(e)
                 result.errors.append(f"Failed to create {sensor_name}: {error_msg}")
-                logger.error(f"Error creating traffic sensor {sensor_name}: {error_msg}")
+                logger.error("Error creating traffic sensor %s: %s", sensor_name, error_msg)
 
     return created_ids
 
@@ -688,6 +751,10 @@ def parse_arguments():
     parser.add_argument("--user", help="PRTG Username")
     parser.add_argument("--passhash", help="PRTG Passhash/API Key")
     parser.add_argument("--snmp-community", help="SNMP Community String")
+    parser.add_argument("--config", default="config.yaml", help="Path to config file")
+    parser.add_argument(
+        "--port-name-template", help="Port Name Template (e.g. '([port]) [ifalias]')"
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -761,18 +828,30 @@ async def resolve_targets(args: argparse.Namespace, prtg: PRTGClient) -> List[tu
 
     return targets
 
+# pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements
 async def process_device(
     device_id: int,
     device_ip: str,
     is_new: bool,
     prtg: PRTGClient,
-    snmp: SNMPScanner,
+    config: Config,
     dry_run: bool
 ):
     """Orchestrates the onboarding process for a single device."""
     result = OnboardingResult(device_id, device_ip)
 
-    # 1. Local SNMP Scan
+    # 1. Fetch/Set Port Name Template
+    if not config.port_name_template:
+        device_template = prtg.get_property(device_id, "portnametemplate")
+        if device_template:
+            config.port_name_template = device_template
+            logger.info("Using Port Name Template from device: %s", device_template)
+        else:
+            config.port_name_template = "([ifname]) [ifalias]"
+            logger.info("No template found on device. Using default: %s", config.port_name_template)
+
+    # 2. Local SNMP Scan
+    snmp = SNMPScanner(config.snmp_community, config.snmp_port)
     interfaces = await snmp.scan_interfaces(device_ip)
     result.interfaces_found = len(interfaces)
 
@@ -782,7 +861,7 @@ async def process_device(
         result.print_summary()
         return
 
-    # 2. Get Current State
+    # 3. Get Current State
     current_sensors = [] if dry_run and is_new else prtg.list_sensors(device_id)
 
     # 3. Create Core Sensors
@@ -790,7 +869,7 @@ async def process_device(
 
     # 4. Create Traffic Sensors
     new_traffic_ids = await process_traffic_sensors(
-        prtg, device_id, interfaces, current_sensors, result, dry_run
+        prtg, device_id, interfaces, current_sensors, result, config, dry_run
     )
 
     # 5. Set Dependencies
@@ -817,16 +896,14 @@ async def main():
         logger.debug("Debug logging enabled")
 
     config = Config.from_args(args)
-
     prtg = PRTGClient(config)
-    snmp = SNMPScanner(config.snmp_community, config.snmp_port)
 
     # Determine targets
     targets = await resolve_targets(args, prtg)
 
     # Process Targets
     for device_id, device_ip, is_new in targets:
-        await process_device(device_id, device_ip, is_new, prtg, snmp, args.dry_run)
+        await process_device(device_id, device_ip, is_new, prtg, config, args.dry_run)
 
 if __name__ == "__main__":
     asyncio.run(main())

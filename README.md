@@ -22,10 +22,24 @@ This script automates the onboarding and updating of devices in PRTG.
 
 ## Configuration
 
-The script supports three ways to configure credentials, prioritized in this order:
+The script supports four ways to configure credentials and settings, prioritized in this order:
 1. **Command Line Arguments**
 2. **Environment Variables**
-3. **Interactive Prompts** (if values are missing)
+3. **`config.yaml` File** (Recommended for persistence)
+4. **Interactive Prompts** (If values are missing)
+
+### Configuration Hierarchy
+Settings are merged in the order above. CLI flags always override environment variables and configuration files.
+
+### 1. `config.yaml` (Recommended)
+You can store your persistent settings in a `config.yaml` file in the same directory. See [config_example.yaml](config_example.yaml) for a template.
+
+```yaml
+base_url: "https://your-prtg.com"
+api_token: "YOUR_TOKEN"
+snmp_community: "public"
+port_name_template: "([ifname]) [ifalias]"
+```
 
 ### Command Line Flags
 | Flag | Description |
@@ -35,6 +49,8 @@ The script supports three ways to configure credentials, prioritized in this ord
 | `--user` | PRTG Username (Legacy) |
 | `--passhash` | Passhash or API Key (Legacy) |
 | `--snmp-community` | SNMP Community string |
+| `--config` | Path to config file (default: `config.yaml`) |
+| `--port-name-template`| Custom naming template (e.g. `([port]) [ifalias]`) |
 
 ### Environment Variables
 
@@ -45,6 +61,7 @@ The script supports three ways to configure credentials, prioritized in this ord
 | `PRTG_USER` | PRTG API Username | No* |
 | `PRTG_PASSHASH` | PRTG API Passhash | No* |
 | `PRTG_SNMP_COMMUNITY` | SNMP Community String (default: `public`) | No |
+| `PRTG_PORT_NAME_TEMPLATE`| Custom port naming template | No |
 | `PRTG_VERIFY_SSL` | Verify SSL Certificates (`true`/`false`) | No |
 
 *\*You must provide either an API Token OR a Username + Passhash combo.*
@@ -86,12 +103,15 @@ This script is compatible with PRTG Hosted Monitor, but requires specific networ
 
 ## How it Works
 
-1.  **SNMP Scan**: The script uses `pysnmp` to walk the device's Interface and ifXTable MIBs directy.
+1.  **SNMP Scan**: The script uses `pysnmp` to walk the device's Interface and ifXTable MIBs directy, collecting `ifName`, `ifAlias`, `ifDescr`, and `ifSpeed`.
 2.  **Filter**: It filters for interfaces where `ifType` is physical (Gigabit, FastEthernet, etc.) and `ifAdminStatus` is Up.
-3.  **Match**: It compares found interfaces with existing PRTG sensors.
-4.  **Clone & Configure**: It finds an existing sensor of the same type in PRTG, clones it using `duplicateobject.htm`, and updates its properties (Interface Index, Name) locally. 
-    *   *Note*: This requires at least one "Template" sensor of each type (Ping, SNMP Traffic, etc.) to exist somewhere in your PRTG installation.
-5.  **Core Sensors**: Ensures Ping, CPU, Memory, and Uptime sensors exist.
+3.  **Naming Logic**:
+    -   It supports full PRTG placeholders: `[port]`, `[ifalias]`, `[ifname]`, `[ifdescr]`, `[ifspeed]`, and `[ifsensor]`.
+    -   It automatically attempts to fetch the "Port Name Template" from the PRTG device settings.
+    -   If no template is found, it defaults to `([ifname]) [ifalias]`.
+4.  **Duplicate Prevention**: Before creating any sensor, it generates the name and checks if a sensor with the exact same name already exists on the device.
+5.  **Clone & Configure**: It finds an existing template sensor (e.g., `snmptraffic` or `snmptraffic64`), clones it, and updates the Interface Index and Name.
+6.  **Core Sensors**: Ensures Ping, CPU, Memory, and Uptime sensors exist.
 
 ## License
 

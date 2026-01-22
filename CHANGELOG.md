@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.4.0] - 2026-01-22
+
+### Added
+- **Configuration File Support**: Introduced `config.yaml` support for persistent settings with CLI overrides.
+- **Advanced Port Naming**: Implemented full PRTG placeholder support (`[port]`, `[ifalias]`, `[ifname]`, etc.).
+- **Smart Template Discovery**: Script now auto-fetches `portnametemplate` from PRTG devices.
+- **Duplicate Prevention**: Added mandatory name-based check to prevent redundant sensor creation.
+- **Bandwidth Discovery**: Added `ifSpeed` collection to the SNMP scanner.
+- **Example Configuration**: Provided `config_example.yaml`.
+
+### Changed
+- **Config Architecture**: Refactored `Config` class to support YAML, Env, and CLI hierarchies.
+- **Logic Functions**: Updated `process_device` and `process_traffic_sensors` to use advanced naming logic.
+
+### Fixed
+- **API Parameter Syntax**: Corrected `filter_type` usage for sensor discovery.
+- **Template Reliability**: Added support for `snmptraffic64` and alternative type naming during discovery.
+
 ## [1.3.0] - 2026-01-22
 
 ### Added

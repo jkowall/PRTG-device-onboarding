@@ -1,0 +1,24 @@
+# PRTG Device Onboarding Configuration Example
+# Save as config.yaml
+
+# PRTG API Connection
+base_url: "https://your-instance.my-prtg.com"
+
+# Authentication (Preferred: API Token)
+# api_token: "YOUR_API_TOKEN_HERE"
+
+# Legacy Authentication (Fallback)
+username: "admin"
+passhash: "12345678"
+
+# SNMP Settings
+snmp_community: "public"
+snmp_port: 161
+
+# Global Settings
+verify_ssl: true
+
+# Advanced Naming (Optional)
+# Supported variables: [port], [ifalias], [ifname], [ifdescr], [ifspeed], [ifsensor]
+# Default is to fetch from device, or use: "([ifname]) [ifalias]"
+# port_name_template: "([ifname]) [ifalias]"
