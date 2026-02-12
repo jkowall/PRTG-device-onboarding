@@ -582,9 +582,14 @@ class PRTGClient:
             logger.error("Failed to clone sensor '%s': %s", new_name, e)
             return None
 
-    def pause_sensor(self, sensor_id: int, msg: str):
-        """Pauses a sensor with a message."""
-        self._req("GET", "/api/pause.htm", params={"id": sensor_id, "action": 0, "pausemsg": msg})
+    def pause_sensor(self, sensor_id: int, msg: str = "", action: int = 0):
+        """Pauses (0) or Simulates Resume (1) a sensor.
+           Note: PRTG 'pause.htm' uses action=0 to pause, action=1 to resume.
+        """
+        params = {"id": sensor_id, "action": action}
+        if action == 0 and msg:
+            params["pausemsg"] = msg
+        self._req("GET", "/api/pause.htm", params=params)
 
     def set_dependency(self, device_id: int, sensor_id: int):
         """Sets the device dependency to a specific sensor."""
@@ -732,6 +737,12 @@ async def process_traffic_sensors(
     # 1. Identify existing sensor names and IDs
     existing_sensors = {s.get("name"): s.get("objid") for s in sensors}
 
+    # Debug: Log existing status of sensors to understand why they aren't being picked up or resumed
+    for s in sensors:
+         if "traffic" in s.get("sensortype", "").lower():
+             logger.debug("Existing Traffic Sensor: %s (ID: %s, Type: %s, Status: %s)", 
+                          s.get("name"), s.get("objid"), s.get("sensortype"), s.get("status_raw"))
+
     for iface in interfaces:
         idx = iface['ifindex']
         name = iface.get('ifname', '')
@@ -764,8 +775,22 @@ async def process_traffic_sensors(
         
         # 3. Duplicate Check
         if sensor_name in existing_sensors:
-            logger.debug("Existing sensor matches name: %s", sensor_name)
-            relevant_ids.append(existing_sensors[sensor_name])
+            existing_id = existing_sensors[sensor_name]
+            logger.debug("Existing sensor matches name: %s (ID: %s)", sensor_name, existing_id)
+            relevant_ids.append(existing_id)
+            
+            # CRITICAL FIX: Ensure existing sensor is unpaused
+            # Find the sensor dict to check status
+            s = next((s for s in sensors if s['objid'] == existing_id), None)
+            if s and s.get("status_raw") in [7, 8, 9, 11, 12]: # Paused
+                 if dry_run:
+                     logger.info("[DRY-RUN] Would RESUME matched traffic sensor: %s", sensor_name)
+                 else:
+                     logger.info("Resuming matched traffic sensor: %s", sensor_name)
+                     try:
+                         client.pause_sensor(existing_id, action=1) # 1 = Resume
+                     except Exception as e:
+                         logger.error("Failed to resume sensor %s: %s", existing_id, e)
             continue
 
         if dry_run:
