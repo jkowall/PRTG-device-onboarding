@@ -614,71 +614,107 @@ async def ensure_core_sensors(
     result: OnboardingResult,
     dry_run: bool
 ) -> int:
-    """Checks for Ping, CPU, Mem, Uptime. Returns Ping ID."""
-    # existing_types = {s.get("sensortype"): s.get("objid") for s in sensors} # Unused
+    """Checks for Ping, CPU, Mem, Uptime. Handles duplicates. Returns Ping ID."""
     ping_id = None
 
-    # Check Ping specifically (handle variations like 'ping' or 'ping_v2')
-    for s in sensors:
-        if "ping" in s.get("sensortype", ""):
-            ping_id = s.get("objid")
-            break
-
-    # Required Map
+    # Required Map: Internal Key -> PRTG Sensor Type (normalized to lowercase for check)
     required = {
-        "ping": "ping",
-        "snmp_cpu": "snmpcpu",
-        "snmp_mem": "snmpmemory",
-        "snmp_uptime": "snmpuptime"
+        "ping": ["ping"],
+        "snmp_cpu": ["snmpcpu", "snmp cpu load"],
+        "snmp_mem": ["snmpmemory", "snmp memory"],
+        "snmp_uptime": ["snmpuptime", "snmp system uptime"]
     }
 
-    for key, prtg_type in required.items():
-        # Check if any sensor matches the type loosely
-        found = False
+    # Helper to find all sensors matching a key
+    def find_matching_sensors(key_types):
+        matches = []
         for s in sensors:
-            if prtg_type in s.get("sensortype", ""):
-                found = True
-                break
+            s_type = s.get("sensortype", "").lower()
+            s_name = s.get("name", "").lower()
+            # Match by type OR name (for some legacy sensors)
+            if any(t in s_type for t in key_types) or any(t in s_name for t in key_types):
+                matches.append(s)
+        return matches
 
-        if not found:
-            name = key.replace("_", " ").upper()
+    for key, valid_types in required.items():
+        name = key.replace("_", " ").upper()
+        matches = find_matching_sensors(valid_types)
+        
+        selected_sensor = None
+
+        if matches:
+            # 1. Deduplication Strategy
+            # Priority: Active (Up/Down/Warning) > Paused > Unknown
+            # Sort by status (Up/Down/Warn < Paused)
+            # Status Raw: 3=Up, 5=Down, 13=Warn, 7=Paused, 8=PausedByDep
+            # We want to prefer non-7/8.
+            
+            def specific_sort(s):
+                status = s.get("status_raw", 0)
+                # Give priority to Up(3)/Down(5)/Warn(13) over Paused(7/8)
+                priority = 0 if status in [3, 5, 13, 2, 4] else 1 
+                return (priority, s.get("objid"))
+
+            matches.sort(key=specific_sort)
+            selected_sensor = matches[0]
+            
+            # Resume if paused
+            if selected_sensor.get("status_raw") in [7, 8, 9, 11, 12]: # Paused states
+                if dry_run:
+                    logger.info("[DRY-RUN] Would RESUME existing %s sensor (ID: %s)", name, selected_sensor['objid'])
+                else:
+                    logger.info("Resuming existing %s sensor (ID: %s)", name, selected_sensor['objid'])
+                    try:
+                        client._req("GET", "/api/pause.htm", params={"id": selected_sensor['objid'], "action": 1})
+                    except Exception as e:
+                        logger.error("Failed to resume sensor %s: %s", selected_sensor['objid'], e)
+            
+            # Delete duplicates
+            if len(matches) > 1:
+                for duplicate in matches[1:]:
+                    if dry_run:
+                        logger.info("[DRY-RUN] Would DELETE duplicate %s sensor (ID: %s)", name, duplicate['objid'])
+                    else:
+                        logger.info("Deleting duplicate %s sensor (ID: %s)", name, duplicate['objid'])
+                        try:
+                            client.delete_object(duplicate['objid'])
+                        except Exception as e:
+                            logger.error("Failed to delete duplicate %s: %s", duplicate['objid'], e)
+
+            # Assign Ping ID if this is the ping sensor
+            if key == "ping":
+                ping_id = selected_sensor['objid']
+
+            result.foundational_sensors_created.append(f"{name} (Existing)")
+
+        else:
+            # Create New
             if dry_run:
-                # Preview info for dry-run
-                logger.info(
-                    "[DRY-RUN] Would clone template for %s to create %s sensor.",
-                    prtg_type, name
-                )
+                logger.info("[DRY-RUN] Would clone template for %s to create %s sensor.", valid_types[0], name)
                 if key == "ping":
                     ping_id = 99999
             else:
                 logger.info("Creating missing %s sensor...", name)
                 try:
-                    # 1. Find Template (Try multiple common types)
-                    type_candidates = [prtg_type]
-                    if prtg_type == "snmpmemory":
-                        type_candidates.append("snmpmem") # Alternative type name
-                    
-                    template_id = client.find_template_sensor(type_candidates)
+                    # Try to find a template using the valid types
+                    template_id = client.find_template_sensor(valid_types)
                     if not template_id:
-                        raise Exception(
-                            f"No existing sensor of types {type_candidates} "
-                            "found to use as template."
-                        )
+                        # Fallback for generic types if exact match fails
+                        if key == "snmp_mem": 
+                            template_id = client.find_template_sensor(["snmpmem", "snmpmemory"])
+                    
+                    if not template_id:
+                        raise Exception(f"No template found for {name}")
 
-                    # 2. Clone
                     new_id = await client.clone_sensor(template_id, device_id, name)
-
                     if new_id:
-                        result.foundational_sensors_created.append(name)
+                        result.foundational_sensors_created.append(f"{name} (New)")
                         if key == "ping":
                             ping_id = new_id
                         logger.info("Successfully created %s sensor (ID: %s)", name, new_id)
                     else:
-                        raise Exception("Clone operation failed to return a new ID.")
-
-                    await asyncio.sleep(1) # Rate limit safety
-
-                except (requests.RequestException, RuntimeError, json.JSONDecodeError) as e:
+                        raise Exception("Clone failed")
+                except Exception as e:
                     error_msg = str(e)
                     result.errors.append(f"Failed to create {name}: {error_msg}")
                     logger.error("Error creating %s: %s", name, error_msg)
@@ -698,6 +734,13 @@ async def process_traffic_sensors(
 
     for iface in interfaces:
         idx = iface['ifindex']
+        name = iface.get('ifname', '')
+        alias = iface.get('ifalias', '')
+        descr = iface.get('ifdescr', '')
+        
+        logger.debug("Processing Interface %s: ifName='%s', ifAlias='%s', ifDescr='%s', Status=%s", 
+                     idx, name, alias, descr, iface['ifadminstatus'])
+
         # Filter: Physical & Admin Up
         if iface['ifadminstatus'] != 1:
             continue
