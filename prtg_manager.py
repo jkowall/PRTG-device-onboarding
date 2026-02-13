@@ -161,7 +161,7 @@ def setup_logging(debug: bool = False):
 setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.5.3"
+__version__ = "1.6.0"
 
 # --- Constants ---
 
@@ -718,15 +718,16 @@ class PRTGClient:
 
 # --- Logic Functions ---
 
+# pylint: disable=too-many-branches,too-many-statements,too-many-locals
 async def ensure_core_sensors(
     client: PRTGClient,
     device_id: int,
     sensors: List[Dict],
     result: OnboardingResult,
     dry_run: bool
-) -> int:
-    """Checks for Ping, CPU, Mem, Uptime. Handles duplicates. Returns Ping ID."""
-    ping_id = None
+) -> Dict[str, Optional[int]]:
+    """Checks for Ping, CPU, Mem, Uptime. Handles duplicates. Returns Dict of Names to keeper IDs."""
+    keepers = {}
 
     # Required Map: Internal Key -> PRTG Sensor Type (normalized to lowercase for check)
     required = {
@@ -777,11 +778,9 @@ async def ensure_core_sensors(
                     logger.info("Resuming existing %s sensor (ID: %s)", name,
                                 selected_sensor['objid'])
                     try:
-                        client._req("GET", "/api/pause.htm",
-                                    params={"id": selected_sensor['objid'], "action": 1})
+                        client.pause_sensor(selected_sensor['objid'], action=1)
                     except requests.RequestException as e:
-                        logger.error("Failed to resume sensor %s: %s",
-                                     selected_sensor['objid'], e)
+                        logger.error("Failed to resume sensor %s: %s", selected_sensor['objid'], e)
             # Delete duplicates
             if len(matches) > 1:
                 for duplicate in matches[1:]:
@@ -791,12 +790,11 @@ async def ensure_core_sensors(
                         logger.info("Deleting duplicate %s sensor (ID: %s)", name, duplicate['objid'])
                         try:
                             client.delete_object(duplicate['objid'])
-                        except Exception as e:
+                        except requests.RequestException as e:
                             logger.error("Failed to delete duplicate %s: %s", duplicate['objid'], e)
 
-            # Assign Ping ID if this is the ping sensor
-            if key == "ping":
-                ping_id = selected_sensor['objid']
+            # Assign to keepers
+            keepers[key] = selected_sensor['objid']
 
             result.foundational_sensors_created.append(f"{name} (Existing)")
 
@@ -805,7 +803,7 @@ async def ensure_core_sensors(
             if dry_run:
                 logger.info("[DRY-RUN] Would clone template for %s to create %s sensor.", valid_types[0], name)
                 if key == "ping":
-                    ping_id = 99999
+                    pass # Keepers handles this
             else:
                 logger.info("Creating missing %s sensor...", name)
                 try:
@@ -817,13 +815,12 @@ async def ensure_core_sensors(
                             template_id = client.find_template_sensor(["snmpmem", "snmpmemory"])
                     
                     if not template_id:
-                        raise Exception(f"No template found for {name}")
+                        raise RuntimeError(f"No template found for {name}")
 
                     new_id = await client.clone_sensor(template_id, device_id, name)
                     if new_id:
                         result.foundational_sensors_created.append(f"{name} (New)")
-                        if key == "ping":
-                            ping_id = new_id
+                        keepers[key] = new_id
                         
                         # Resume the new sensor immediately
                         if dry_run:
@@ -832,18 +829,18 @@ async def ensure_core_sensors(
                             try:
                                 client.pause_sensor(new_id, action=1)
                                 logger.info("Successfully created and RESUMED %s sensor (ID: %s)", name, new_id)
-                            except Exception as e:
+                            except requests.RequestException as e:
                                 logger.error("Created %s (ID: %s) but failed to RESUME: %s", name, new_id, e)
                     else:
-                        raise Exception("Clone failed")
-                except Exception as e:
+                        raise RuntimeError("Clone failed")
+                except (RuntimeError, requests.RequestException) as e:
                     error_msg = str(e)
                     result.errors.append(f"Failed to create {name}: {error_msg}")
                     logger.error("Error creating %s: %s", name, error_msg)
 
-    return ping_id
+    return keepers
 
-# pylint: disable=too-many-arguments,too-many-locals,too-many-branches
+# pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-positional-arguments,too-many-statements
 async def process_traffic_sensors(
     client: PRTGClient, device_id: int, interfaces: List[Dict],
     sensors: List[Dict], result: OnboardingResult, config: Config, dry_run: bool
@@ -896,15 +893,15 @@ async def process_traffic_sensors(
             # CRITICAL FIX: Ensure existing sensor is unpaused
             # Find the sensor dict to check status
             s = next((s for s in sensors if s['objid'] == existing_id), None)
-            if s and s.get("status_raw") in [7, 8, 9, 11, 12]:  # Paused
-                if dry_run:
-                    logger.info("[DRY-RUN] Would RESUME matched traffic sensor: %s", sensor_name)
-                else:
-                    logger.info("Resuming matched traffic sensor: %s", sensor_name)
-                    try:
-                        client.pause_sensor(existing_id, action=1)  # 1 = Resume
-                    except requests.RequestException as e:
-                        logger.error("Failed to resume sensor %s: %s", existing_id, e)
+            if s and s.get("status_raw") in [7, 8, 9, 11, 12]: # Paused
+                 if dry_run:
+                     logger.info("[DRY-RUN] Would RESUME matched traffic sensor: %s", sensor_name)
+                 else:
+                     logger.info("Resuming matched traffic sensor: %s", sensor_name)
+                     try:
+                         client.pause_sensor(existing_id, action=1) # 1 = Resume
+                     except requests.RequestException as e:
+                         logger.error("Failed to resume sensor %s: %s", existing_id, e)
             continue
 
         if dry_run:
@@ -918,7 +915,7 @@ async def process_traffic_sensors(
                 type_candidates = ["snmptraffic", "snmptraffic64"]
                 template_id = client.find_template_sensor(type_candidates)
                 if not template_id:
-                    raise Exception(
+                    raise RuntimeError(
                         f"No existing sensor of types {type_candidates} "
                         "found to use as template."
                     )
@@ -937,7 +934,7 @@ async def process_traffic_sensors(
                 else:
                     result.errors.append(f"Failed to clone sensor: {sensor_name}")
 
-            except Exception as e:
+            except (RuntimeError, requests.RequestException) as e:
                 error_msg = str(e)
                 result.errors.append(f"Failed to create {sensor_name}: {error_msg}")
                 logger.error("Error creating traffic sensor %s: %s", sensor_name, error_msg)
@@ -968,8 +965,7 @@ def parse_arguments():
     cmd_existing = subparsers.add_parser("existing", help="Process existing PRTG devices")
     cmd_existing.add_argument("device_ids", nargs="+", type=int, help="Device IDs to update")
     cmd_existing.add_argument("--dry-run", action="store_true")
-    cmd_existing.add_argument("--cleanup", action="store_true",
-                              help="Delete legacy sensors instead of pausing")
+    cmd_existing.add_argument("--cleanup", action="store_true", help="Strictly enforce standardized sensors by deleting all others")
 
     # Mode: New
     cmd_new = subparsers.add_parser("new", help="Add and onboard a new device")
@@ -977,10 +973,35 @@ def parse_arguments():
     cmd_new.add_argument("name", help="Device Name")
     cmd_new.add_argument("host", help="IP/Hostname")
     cmd_new.add_argument("--dry-run", action="store_true")
-    cmd_new.add_argument("--cleanup", action="store_true",
-                         help="Delete legacy sensors instead of pausing")
+    cmd_new.add_argument("--cleanup", action="store_true", help="Strictly enforce standardized sensors by deleting all others")
 
     return parser.parse_args()
+
+async def verify_pphm_safety(prtg: PRTGClient, group_id: int, host: str):
+    """Checks if a private IP is being added to a Hosted Probe group."""
+    try:
+        probe_name = prtg.get_probe_for_group(group_id)
+        if not probe_name or "Hosted Probe" not in probe_name:
+            return
+
+        # Check if IP is private
+        try:
+            ip_obj = ipaddress.ip_address(host)
+            if not ip_obj.is_private:
+                return
+
+            logger.warning("!!! CAUTION !!!")
+            logger.warning("You are adding a device with a PRIVATE IP (%s) to the '%s'.", host, probe_name)
+            logger.warning("The Hosted Probe runs in the cloud and cannot reach your local network.")
+            logger.warning("Verify you are using a Group ID belonging to a LOCAL REMOTE PROBE.")
+            logger.warning("Waiting 10 seconds. Press Ctrl+C to cancel...")
+            await asyncio.sleep(10)
+        except ValueError:
+            # Host might be a DNS name, skip check or try resolve
+            pass
+    except requests.RequestException as e:
+        logger.warning("Could not verify Probe type: %s", e)
+
 
 async def resolve_targets(args: argparse.Namespace, prtg: PRTGClient) -> List[tuple]:
     """Resolves target devices based on the command mode."""
@@ -1000,45 +1021,20 @@ async def resolve_targets(args: argparse.Namespace, prtg: PRTGClient) -> List[tu
             targets.append((99999, args.host, True))
         else:
             # Safety Check: PPHM Hosted Probe vs Private IP
-            try:
-                probe_name = prtg.get_probe_for_group(args.group_id)
-                if probe_name and "Hosted Probe" in probe_name:
-                    # Check if IP is private
-                    try:
-                        ip_obj = ipaddress.ip_address(args.host)
-                        if ip_obj.is_private:
-                            logger.warning("!!! CAUTION !!!")
-                            logger.warning(
-                                "You are adding a device with a PRIVATE IP (%s) to the '%s'.",
-                                args.host, probe_name
-                            )
-                            logger.warning(
-                                "The Hosted Probe runs in the cloud and "
-                                "cannot reach your local network."
-                            )
-                            logger.warning(
-                                "Verify you are using a Group ID belonging to a LOCAL REMOTE PROBE."
-                            )
-                            logger.warning("Waiting 10 seconds. Press Ctrl+C to cancel...")
-                            await asyncio.sleep(10)
-                    except ValueError:
-                        # Host might be a DNS name, skip check or try resolve
-                        pass
-            except Exception as e:
-                logger.warning("Could not verify Probe type: %s", e)
+            await verify_pphm_safety(prtg, args.group_id, args.host)
 
             try:
                 did = prtg.add_device(args.group_id, args.name, args.host)
                 logger.info("Device created with ID %s", did)
                 targets.append((did, args.host, True))
                 await asyncio.sleep(30) # Wait for PRTG internal commit
-            except Exception as e:
+            except (RuntimeError, requests.RequestException) as e:
                 logger.error("Fatal: %s", e)
                 sys.exit(1)
 
     return targets
 
-# pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements
+# pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements,too-many-positional-arguments
 async def process_device(
     device_id: int,
     device_ip: str,
@@ -1125,10 +1121,11 @@ async def process_device(
     current_sensors = [] if dry_run and is_new else prtg.list_sensors(device_id)
 
     # 3. Create Core Sensors
-    ping_id = await ensure_core_sensors(prtg, device_id, current_sensors, result, dry_run)
+    core_keepers = await ensure_core_sensors(prtg, device_id, current_sensors, result, dry_run)
+    ping_id = core_keepers.get("ping")
 
     # 4. Create Traffic Sensors
-    relevant_traffic_ids = await process_traffic_sensors(
+    traffic_keepers = await process_traffic_sensors(
         prtg, device_id, interfaces, current_sensors, result, config, dry_run
     )
 
@@ -1137,9 +1134,40 @@ async def process_device(
         prtg.set_dependency(device_id, ping_id)
         result.dependency_set = True
 
-    # 6. Clean up Legacy (Existing Mode Only)
-    if not is_new:
-        cleanup_legacy_sensors(current_sensors, relevant_traffic_ids, config, prtg, result, dry_run)
+    # 6. Strict Cleanup
+    keeper_ids = set()
+    for kid in core_keepers.values():
+        if kid:
+            keeper_ids.add(kid)
+    keeper_ids.update(traffic_keepers)
+
+    if config.cleanup_legacy:
+        # Strict Enforcement: Remove anything not in the keeper list
+        for s in current_sensors:
+            sid = s.get("objid")
+            if sid not in keeper_ids:
+                if dry_run:
+                    logger.info("[DRY-RUN] Would DELETE non-standard sensor: %s (ID: %s, Type: %s)", 
+                                s.get("name"), sid, s.get("sensortype"))
+                else:
+                    logger.info("Deleting non-standard sensor: %s (ID: %s)", s.get("name"), sid)
+                    try:
+                        prtg.delete_object(sid)
+                    except requests.RequestException as e:
+                        logger.error("Failed to delete sensor %s: %s", sid, e)
+    else:
+        # Legacy Mode: Only pause traffic sensors that aren't relevant
+        for s in current_sensors:
+            sid = s.get("objid")
+            if "traffic" in s.get("sensortype", "").lower() and sid not in traffic_keepers:
+                # Only pause if not already paused
+                if s.get("status_raw") not in [7, 8, 9, 11, 12]: # Not Paused
+                    if dry_run:
+                        logger.info("[DRY-RUN] Would pause legacy traffic sensor: %s (ID: %s)", s.get("name"), sid)
+                    else:
+                        prtg.pause_sensor(sid, "Paused by Automation (Legacy)")
+                        result.legacy_sensors_paused += 1
+                        logger.info("Paused legacy traffic sensor: %s (ID: %s)", s.get("name"), sid)
 
     result.print_summary()
 
