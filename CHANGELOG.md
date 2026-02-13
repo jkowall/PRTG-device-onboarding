@@ -1,11 +1,21 @@
 # Changelog
 
+## [1.5.3] - 2026-02-13
+
+### Added
+
+- **Fallback Sensor Cleanup**: Implemented a secondary cleanup mechanism that triggers when a local SNMP scan fails. It inspects PRTG sensor status messages for `ifAdminStatus=down` and automatically pauses those sensors to ensure "bad" sensors are handled even without direct device connectivity.
+- **Enhanced Message Matching**: Added case-insensitive substring matching for PRTG status messages (e.g., `ifAdminStatus=down`) to improve reliability across different hardware and PRTG versions.
+
+## [1.5.2] - 2026-02-13
+
+### Changed
+
+- **Refactored Legacy Cleanup**: Extracted legacy sensor cleanup into a dedicated `cleanup_legacy_sensors` function to reduce complexity and improve maintainability.
+- **Improved Core Sensor Identification**: Expanded matching criteria for core sensors (CPU, Memory, Uptime) to include broader name patterns, ensuring better deduplication.
+- **Enhanced Traffic Sensor Detection**: Legacy "Traffic" sensors are now identified by both type and name, ensuring they are correctly paused or deleted even if their type is unconventional.
+
 ## [1.5.1] - 2026-02-13
-
-### Fixed
-
-- Fixed an issue where newly created core sensors (SNMP Memory, etc.) were left in a "Paused" state by explicitly resuming them upon creation.
-- Improved legacy traffic sensor cleanup logic to be case-insensitive and added debug logging for skipped (already paused) sensors.
 
 ## [1.5.0] - 2026-01-22
 

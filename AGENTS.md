@@ -11,6 +11,7 @@ This file contains instructions for AI agents working on this project.
 > - **PRTG API v2** is not supported on Hosted Monitor.
 > **ALWAYS** use the `duplicateobject.htm` (Clone) strategy.
 > **MANDATORY**: Always check if a sensor name already exists on a device before creating a duplicate.
+14. > **PRTG Message Masking**: Be aware that when a device/parent is **Paused**, the original status message (e.g., `ifAdminStatus=down`) is replaced by `Paused by parent`. Fallback logic must run on active/unpaused devices for best results.
 
 ## Cleanup & Safety
 
