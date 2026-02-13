@@ -8,13 +8,8 @@ This script automates the onboarding and updating of devices in PRTG.
 - **Hybrid Scanning**: Fetches device details from PRTG but scans interfaces via local SNMP.
 - **Strict Filtering**: Only creates sensors for interfaces that are **Physical** and **Administratively Up**.
 - **Auto-Dependency**: Automatically sets the Device dependency to the Ping sensor.
-<<<<<<< HEAD
-- **Legacy Cleanup**: In `existing` mode, pauses or **deletes** old traffic sensors.
-- **Fallback Recovery**: If a direct SNMP scan fails, the tool parses PRTG status messages to identify and pause interfaces reporting `ifAdminStatus=down`.
-=======
 - **Legacy Cleanup**: In `existing` mode, pauses or **strictly deletes** non-standard sensors (via `--cleanup`) to ensure a compliant device state.
-
->>>>>>> 128d0e2 (feat: implement strict legacy cleanup and enhance sensor deduplication)
+- **Fallback Recovery**: If a direct SNMP scan fails, the tool parses PRTG status messages to identify and pause interfaces reporting `ifAdminStatus=down`.
 
 - **Bulk Support**: Can process multiple existing devices in one run.
 

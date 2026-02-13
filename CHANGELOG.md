@@ -1,32 +1,20 @@
 # Changelog
 
-<<<<<<< HEAD
-## [1.5.3] - 2026-02-13
-
-### Added
-
-- **Fallback Sensor Cleanup**: Implemented a secondary cleanup mechanism that triggers when a local SNMP scan fails. It inspects PRTG sensor status messages for `ifAdminStatus=down` and automatically pauses those sensors to ensure "bad" sensors are handled even without direct device connectivity.
-- **Enhanced Message Matching**: Added case-insensitive substring matching for PRTG status messages (e.g., `ifAdminStatus=down`) to improve reliability across different hardware and PRTG versions.
-
-## [1.5.2] - 2026-02-13
-
-### Changed
-
-- **Refactored Legacy Cleanup**: Extracted legacy sensor cleanup into a dedicated `cleanup_legacy_sensors` function to reduce complexity and improve maintainability.
-- **Improved Core Sensor Identification**: Expanded matching criteria for core sensors (CPU, Memory, Uptime) to include broader name patterns, ensuring better deduplication.
-- **Enhanced Traffic Sensor Detection**: Legacy "Traffic" sensors are now identified by both type and name, ensuring they are correctly paused or deleted even if their type is unconventional.
-=======
 ## [1.6.0] - 2026-02-13
 
 ### Added
 
 - **Strict Legacy Cleanup**: When `--cleanup` is enabled, the script now strictly enforces a standardized sensor set (Ping, CPU, Mem, Uptime, and relevant Traffic sensors), permanently deleting all other non-matching sensors.
+- **Fallback Sensor Cleanup**: Implemented a secondary cleanup mechanism that triggers when a local SNMP scan fails. It inspects PRTG sensor status messages for `ifAdminStatus=down` and automatically pauses those sensors to ensure "bad" sensors are handled even without direct device connectivity.
+- **Enhanced Message Matching**: Added case-insensitive substring matching for PRTG status messages (e.g., `ifAdminStatus=down`) to improve reliability across different hardware and PRTG versions.
 
 ### Changed
 
 - **Sensor Deduplication**: Updated `ensure_core_sensors` to favor unpaused sensors and automatically delete duplicate core sensors.
 - **Improved Management**: Enhanced `process_device` to consolidate all "keeper" sensor IDs before performing cleanup or pausing operations.
->>>>>>> 128d0e2 (feat: implement strict legacy cleanup and enhance sensor deduplication)
+- **Refactored Legacy Cleanup**: Extracted legacy sensor cleanup into a dedicated `cleanup_legacy_sensors` function to reduce complexity and improve maintainability.
+- **Improved Core Sensor Identification**: Expanded matching criteria for core sensors (CPU, Memory, Uptime) to include broader name patterns, ensuring better deduplication.
+- **Enhanced Traffic Sensor Detection**: Legacy "Traffic" sensors are now identified by both type and name, ensuring they are correctly paused or deleted even if their type is unconventional.
 
 ## [1.5.1] - 2026-02-13
 
