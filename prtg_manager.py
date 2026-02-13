@@ -71,6 +71,7 @@ import getpass
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import ipaddress
+import xml.etree.ElementTree as ET
 
 # We will check and install packages before importing non-standard once
 def check_and_install_packages():
@@ -156,7 +157,7 @@ def setup_logging(debug: bool = False):
 setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 # --- Constants ---
 
@@ -197,7 +198,7 @@ class Config:
     username: Optional[str] = None
     passhash: Optional[str] = None
     api_token: Optional[str] = None
-    snmp_community: str = "public"
+    snmp_community: Optional[str] = None
     snmp_port: int = 161
     verify_ssl: bool = True
     request_timeout: int = 60
@@ -273,7 +274,7 @@ class Config:
         snmp_comm = get_val(
             args.snmp_community, "PRTG_SNMP_COMMUNITY", "snmp_community",
             "SNMP Community (default: public)", req=False
-        ) or "public"
+        )
 
         port_template = get_val(
             getattr(args, 'port_name_template', None),
@@ -521,6 +522,51 @@ class PRTGClient:
             logger.debug("Failed to get property %s for %s: %s", name, object_id, e)
             return None
 
+    def get_object_setting(self, object_id: int, name: str) -> Optional[str]:
+        """Fetches a setting using getobjectproperty.htm (returns XML)."""
+        try:
+            # PRTG returns XML by default for getobjectproperty
+            response_text = self._req("GET", "/api/getobjectproperty.htm", params={
+                "id": object_id, "name": name, "show": "nohtmlencode"
+            })
+            if not response_text:
+                return None
+
+            # Simple XML parsing: <prtg><version>...</version><result>VALUE</result></prtg>
+            # However, sometimes it returns just the value if show=nohtmlencode depends on version
+            # But safer to parse XML if it looks like XML
+            text = response_text.strip()
+            if text.startswith("<"):
+                root = ET.fromstring(text)
+                result = root.find("result")
+                if result is not None:
+                    return result.text
+            return text
+        except Exception as e:
+            logger.debug("Failed to get setting %s for %s: %s", name, object_id, e)
+            return None
+
+    def get_inherited_snmp_community(self, device_id: int) -> Optional[str]:
+        """
+        Attempts to fetch the SNMP community from the device settings.
+        Checks multiple property names used by PRTG for different device types.
+        """
+        # Property names to check in order of likelihood
+        # 'snmpcommunity' is the most common for Generic/Windows
+        # 'cifssnmpcommunity' is often used for Linux/Unix
+        # 'snmp_community_v2' is explicit v2
+        candidates = ["snmpcommunity", "cifssnmpcommunity", "snmp_community_v2"]
+
+        for prop in candidates:
+            val = self.get_object_setting(device_id, prop)
+            # Filter out masked passwords or empty strings
+            if val and val.strip() and "****" not in val:
+                logger.info("Found inherited SNMP community via '%s'", prop)
+                return val.strip()
+
+        logger.debug("Could not determine inherited SNMP community (or it is masked).")
+        return None
+
     def find_template_sensor(self, sensor_types: List[str] | str) -> Optional[int]:
         """Finds any existing sensor of the given type(s) to use as a clone source."""
         if isinstance(sensor_types, str):
@@ -716,7 +762,16 @@ async def ensure_core_sensors(
                         result.foundational_sensors_created.append(f"{name} (New)")
                         if key == "ping":
                             ping_id = new_id
-                        logger.info("Successfully created %s sensor (ID: %s)", name, new_id)
+                        
+                        # Resume the new sensor immediately
+                        if dry_run:
+                            logger.info("[DRY-RUN] Would RESUME new %s sensor (ID: %s)", name, new_id)
+                        else:
+                            try:
+                                client.pause_sensor(new_id, action=1)
+                                logger.info("Successfully created and RESUMED %s sensor (ID: %s)", name, new_id)
+                            except Exception as e:
+                                logger.error("Created %s (ID: %s) but failed to RESUME: %s", name, new_id, e)
                     else:
                         raise Exception("Clone failed")
                 except Exception as e:
@@ -944,8 +999,17 @@ async def process_device(
             config.port_name_template = "([ifname]) [ifalias]"
             logger.info("No template found on device. Using default: %s", config.port_name_template)
 
-    # 2. Local SNMP Scan
-    snmp = SNMPScanner(config.snmp_community, config.snmp_port)
+    # 2. SNMP Community Resolution
+    community = config.snmp_community
+    if not community:
+        # Attempt to fetch from PRTG
+        community = prtg.get_inherited_snmp_community(device_id)
+        if not community:
+            community = "public"
+            logger.warning("No SNMP community provided or inherited. Defaulting to 'public'.")
+    
+    # 3. Local SNMP Scan
+    snmp = SNMPScanner(community, config.snmp_port)
     interfaces = await snmp.scan_interfaces(device_ip)
     result.interfaces_found = len(interfaces)
 
@@ -974,7 +1038,8 @@ async def process_device(
     # 6. Clean up Legacy (Existing Mode Only)
     if not is_new:
         for s in current_sensors:
-            if "traffic" in s.get("sensortype", "") and s.get("objid") not in relevant_traffic_ids:
+            # Case-insensitive check for traffic sensors
+            if "traffic" in s.get("sensortype", "").lower() and s.get("objid") not in relevant_traffic_ids:
                 if config.cleanup_legacy:
                     if dry_run:
                         logger.info("[DRY-RUN] Would delete legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
@@ -985,13 +1050,16 @@ async def process_device(
                         except Exception as e:
                             logger.error("Failed to delete sensor %s: %s", s.get("objid"), e)
                 else:
-                    if s.get("status_raw") != 7: # 7 is paused
+                    # Only pause if not already paused
+                    if s.get("status_raw") not in [7, 8, 9, 11, 12]: # Not Paused
                         if dry_run:
                             logger.info("[DRY-RUN] Would pause legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
                         else:
                             prtg.pause_sensor(s['objid'], "Paused by Automation (Legacy)")
                             result.legacy_sensors_paused += 1
                             logger.info("Paused legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
+                    else:
+                        logger.debug("Skipping legacy purge for %s (ID: %s) - Already Paused", s.get("name"), s.get("objid"))
 
     result.print_summary()
 
