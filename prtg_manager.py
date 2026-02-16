@@ -584,7 +584,7 @@ class PRTGClient:
         current_id = device_id
         depth_limit = 10 # Safety break
         
-        candidates = ["snmpcommunity", "cifssnmpcommunity", "snmp_community_v2"]
+        candidates = ["snmpcommunity", "cifssnmpcommunity", "snmp_community_v2", "snmpcommv2"]
 
         for level in range(depth_limit):
             logger.debug("Checking SNMP community at Level %s (ID: %s)", level, current_id)
@@ -595,14 +595,14 @@ class PRTGClient:
                 
                 # Validation Logic:
                 # 1. Must exist and not be empty
-                # 2. Must not be masked (****)
+                # 2. Must not be masked (***)
                 # 3. Must not be a placeholder like "(inherited)" or "Inherited"
                 if val and val.strip():
                     val_clean = val.strip()
                     logger.debug("Inspecting candidate value for '%s': '%s'", prop, val_clean)
                     
                     v_low = val_clean.lower()
-                    if ("****" not in val_clean and "(inherited)" not in v_low
+                    if ("***" not in val_clean and "(inherited)" not in v_low
                             and "not found" not in v_low):
                         logger.info("Found SNMP community at ID %s via '%s'", current_id, prop)
                         return val_clean
@@ -733,7 +733,7 @@ async def ensure_core_sensors(
     required = {
         "ping": ["ping"],
         "snmp_cpu": ["snmpcpu", "snmp cpu load", "snmp cpu"],
-        "snmp_mem": ["snmpmemory", "snmp memory"],
+        "snmp_mem": ["snmpmemory", "snmp memory", "snmp mem"],
         "snmp_uptime": ["snmpuptime", "snmp system uptime", "snmp uptime"]
     }
 
@@ -931,6 +931,12 @@ async def process_traffic_sensors(
                     relevant_ids.append(new_id)
                     result.traffic_sensors_created += 1
                     logger.info("Created: %s (ID: %s)", sensor_name, new_id)
+                    # Resume the new sensor immediately
+                    try:
+                        client.pause_sensor(new_id, action=1)
+                        logger.info("Successfully RESUMED %s sensor (ID: %s)", sensor_name, new_id)
+                    except requests.RequestException as e:
+                        logger.error("Created %s (ID: %s) but failed to RESUME: %s", sensor_name, new_id, e)
                 else:
                     result.errors.append(f"Failed to clone sensor: {sensor_name}")
 

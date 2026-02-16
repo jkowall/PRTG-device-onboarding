@@ -4,12 +4,17 @@
 
 ### Added
 
+- Expanded SNMP community candidate discovery logic with `snmpcommv2`.
+- Automatic sensor resumption for newly created traffic sensors.
+- Recognition for "SNMP Mem" sensor types.
 - **Strict Legacy Cleanup**: When `--cleanup` is enabled, the script now strictly enforces a standardized sensor set (Ping, CPU, Mem, Uptime, and relevant Traffic sensors), permanently deleting all other non-matching sensors.
 - **Fallback Sensor Cleanup**: Implemented a secondary cleanup mechanism that triggers when a local SNMP scan fails. It inspects PRTG sensor status messages for `ifAdminStatus=down` and automatically pauses those sensors to ensure "bad" sensors are handled even without direct device connectivity.
 - **Enhanced Message Matching**: Added case-insensitive substring matching for PRTG status messages (e.g., `ifAdminStatus=down`) to improve reliability across different hardware and PRTG versions.
 
 ### Changed
 
+- Updated PRTG password masking detection to check for `***` (previously `****`).
+- Improved logging for sensor resumption status.
 - **Sensor Deduplication**: Updated `ensure_core_sensors` to favor unpaused sensors and automatically delete duplicate core sensors.
 - **Improved Management**: Enhanced `process_device` to consolidate all "keeper" sensor IDs before performing cleanup or pausing operations.
 - **Refactored Legacy Cleanup**: Extracted legacy sensor cleanup into a dedicated `cleanup_legacy_sensors` function to reduce complexity and improve maintainability.
