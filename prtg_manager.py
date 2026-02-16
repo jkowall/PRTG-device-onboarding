@@ -927,6 +927,10 @@ async def process_traffic_sensors(
                     # 3. Configure Interface
                     client.set_property(new_id, "interfacenumber", idx)
                     client.set_property(new_id, "tags", "bandwidth_sensor automated")
+                    # Set additional channels and connection status handling
+                    client.set_property(new_id, "errorstatus", "2") # Show down status when disconnected, ignore when deactivated
+                    client.set_property(new_id, "errinout", "1")   # Errors in and errors out
+                    client.set_property(new_id, "discinout", "1")  # Discards in and discards out
 
                     relevant_ids.append(new_id)
                     result.traffic_sensors_created += 1
