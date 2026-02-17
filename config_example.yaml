@@ -15,6 +15,12 @@ passhash: "12345678"
 snmp_community: "public"
 snmp_port: 161
 
+# Group-Specific Credentials (Optional)
+# Run 'python prtg_manager.py generate-config' to auto-populate this list.
+group_credentials:
+  # 1234: "community_string"
+  # 5678: "another_community"
+
 # Global Settings
 verify_ssl: true
 

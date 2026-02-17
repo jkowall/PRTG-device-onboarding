@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.8.0] - 2026-02-16
+
+### Added
+
+- **Config Generation**: New `generate-config` command to crawl PRTG and generate a `config.yaml` snippet with all Group IDs and names.
+- **Group-Based Credentials**: Added `group_credentials` support in `config.yaml` to map Group IDs to SNMP Community Strings.
+- **Recursive Processing**: Updated `existing` command to support `--group-id`, allowing recursive onboarding/cleaning of entire device trees.
+
 ## [1.7.0] - 2026-02-16
 
 ### Added

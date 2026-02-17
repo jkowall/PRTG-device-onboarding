@@ -161,7 +161,7 @@ def setup_logging(debug: bool = False):
 setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.6.0"
+__version__ = "1.8.0"
 
 # --- Constants ---
 
@@ -208,6 +208,7 @@ class Config:
     request_timeout: int = 60
     port_name_template: Optional[str] = None
     cleanup_legacy: bool = False
+    group_credentials: Dict[int, str] = field(default_factory=dict)
 
     @staticmethod
     def get_with_prompt(
@@ -298,7 +299,8 @@ class Config:
                 getattr(args, 'cleanup', None),
                 "PRTG_CLEANUP_LEGACY", "cleanup_legacy",
                 "Cleanup legacy sensors (True/False)", req=False
-            ) in (True, "True", "true", "1")
+            ) in (True, "True", "true", "1"),
+            group_credentials=yaml_data.get("group_credentials", {})
         )
 
 @dataclass
@@ -497,6 +499,16 @@ class PRTGClient:
             return groups[0].get("probe")
         return None
 
+    def get_all_groups(self) -> List[Dict]:
+        """Fetches all groups with their ID, Name, and Parent Probe."""
+        data = self._req("GET", "/api/table.json", params={
+            "content": "groups",
+            "columns": "objid,name,probe",
+            "count": 50000,
+            "output": "json"
+        })
+        return data.get("groups", [])
+
     def list_sensors(self, device_id: int) -> List[Dict]:
         """Get all sensors for a device."""
         data = self._req("GET", "/api/table.json", params={
@@ -507,6 +519,50 @@ class PRTGClient:
             "output": "json"
         })
         return data.get("sensors", [])
+
+    def get_devices_in_group_recursive(self, group_id: int) -> List[Dict]:
+        """Fetches all devices under a group recursively."""
+        # Note: PRTG API doesn't have a direct 'recursive devices in group' call that is simple.
+        # We can fetch all devices and filter, or walk the tree.
+        # However, we can use content=devices&id=GROUP_ID? No, that returns the group itself for content=groups.
+        # content=devices&filter_parentid=GROUP_ID only gives direct children.
+        
+        # Strategy: Fetch ALL devices and filter by probe/group? No, too heavy.
+        # Better: Use xml/json tree fetch?
+        # Actually, 'table.json?content=devices&columns=objid,host,group,probe' gives us flat list.
+        # But we need to know if they fall under the specific group hierarchy.
+        
+        # Efficient approach for this script:
+        # Since we want to support deep recursion, we might need to fetch the full tree or iterate.
+        # Let's try to fetch all devices and "filter_name" or similar? No.
+        
+        # Let's use a small recursion helper here since we have the client.
+        devices = []
+        
+        # Get direct child devices
+        d_data = self._req("GET", "/api/table.json", params={
+            "content": "devices",
+            "columns": "objid,host",
+            "filter_parentid": group_id,
+            "output": "json",
+             "count": 5000
+        })
+        devices.extend(d_data.get("devices", []))
+        
+        # Get child groups to recurse
+        g_data = self._req("GET", "/api/table.json", params={
+            "content": "groups",
+            "columns": "objid",
+            "filter_parentid": group_id,
+            "output": "json",
+            "count": 5000
+        })
+        subgroups = g_data.get("groups", [])
+        
+        for sg in subgroups:
+            devices.extend(self.get_devices_in_group_recursive(sg['objid']))
+            
+        return devices
 
     def set_property(self, object_id: int, name: str, value: Any):
         """Sets a property on a PRTG object."""
@@ -576,56 +632,7 @@ class PRTGClient:
             logger.debug("Failed to get parent for %s: %s", object_id, e)
             return None
 
-    def get_inherited_snmp_community(self, device_id: int) -> Optional[str]:
-        """
-        Iteratively fetches the effective SNMP community by traversing up the object tree.
-        Checks Device -> Group(s) -> Probe -> Root.
-        """
-        current_id = device_id
-        depth_limit = 10 # Safety break
-        
-        candidates = ["snmpcommunity", "cifssnmpcommunity", "snmp_community_v2", "snmpcommv2"]
 
-        for level in range(depth_limit):
-            logger.debug("Checking SNMP community at Level %s (ID: %s)", level, current_id)
-            
-            for prop in candidates:
-                # Use existing get_object_setting which handles XML parsing if needed
-                val = self.get_object_setting(current_id, prop)
-                
-                # Validation Logic:
-                # 1. Must exist and not be empty
-                # 2. Must not be masked (***)
-                # 3. Must not be a placeholder like "(inherited)" or "Inherited"
-                if val and val.strip():
-                    val_clean = val.strip()
-                    logger.debug("Inspecting candidate value for '%s': '%s'", prop, val_clean)
-                    
-                    v_low = val_clean.lower()
-                    if ("***" not in val_clean and "(inherited)" not in v_low
-                            and "not found" not in v_low):
-                        logger.info("Found SNMP community at ID %s via '%s'", current_id, prop)
-                        return val_clean
-
-                    logger.debug("Rejected candidate '%s' (Masked, Inherited, or Not Found)",
-                                 val_clean)
-
-            # If not found, move up to parent
-            parent_id = self.get_parent_id(current_id)
-            if not parent_id or parent_id == 0:
-                logger.debug("Reached root or orphan at ID %s. Stopping lookup.", current_id)
-                break
-            
-            current_id = parent_id
-
-        logger.debug("Could not determine inherited SNMP community via API (checked %s levels).", depth_limit)
-        
-        # Fallback to config if available
-        if self.config.snmp_community:
-            logger.info("Using configured fallback SNMP community.")
-            return self.config.snmp_community
-            
-        return None
 
     def find_template_sensor(self, sensor_types: List[str] | str) -> Optional[int]:
         """Finds any existing sensor of the given type(s) to use as a clone source."""
@@ -973,9 +980,9 @@ def parse_arguments():
 
     # Mode: Existing
     cmd_existing = subparsers.add_parser("existing", help="Process existing PRTG devices")
-    cmd_existing.add_argument("device_ids", nargs="+", type=int, help="Device IDs to update")
+    cmd_existing.add_argument("device_ids", nargs="*", type=int, help="Device IDs to update")
+    cmd_existing.add_argument("--group-id", type=int, help="Process all devices recursively under this Group ID")
     cmd_existing.add_argument("--dry-run", action="store_true")
-    cmd_existing.add_argument("--cleanup", action="store_true", help="Strictly enforce standardized sensors by deleting all others")
 
     # Mode: New
     cmd_new = subparsers.add_parser("new", help="Add and onboard a new device")
@@ -984,6 +991,9 @@ def parse_arguments():
     cmd_new.add_argument("host", help="IP/Hostname")
     cmd_new.add_argument("--dry-run", action="store_true")
     cmd_new.add_argument("--cleanup", action="store_true", help="Strictly enforce standardized sensors by deleting all others")
+
+    # Mode: Generate Config
+    subparsers.add_parser("generate-config", help="Generate a config file with all Groups pre-filled")
 
     return parser.parse_args()
 
@@ -1018,7 +1028,29 @@ async def resolve_targets(args: argparse.Namespace, prtg: PRTGClient) -> List[tu
     targets = [] # List of (id, ip, is_new)
 
     if args.command == "existing":
-        for did in args.device_ids:
+        device_ids = set()
+        
+        # 1. Explicit Device IDs
+        if args.device_ids:
+            device_ids.update(args.device_ids)
+            
+        # 2. Group ID (Recursive)
+        if args.group_id:
+            logger.info("Fetching all devices recursively under Group %s...", args.group_id)
+            try:
+                devices = prtg.get_devices_in_group_recursive(args.group_id)
+                logger.info("Found %s devices in group %s.", len(devices), args.group_id)
+                for d in devices:
+                    device_ids.add(d['objid'])
+            except requests.RequestException as e:
+                logger.error("Failed to fetch devices for group %s: %s", args.group_id, e)
+                sys.exit(1)
+
+        if not device_ids:
+            logger.error("No devices specified. Provide devices IDs or a --group-id.")
+            sys.exit(1)
+
+        for did in device_ids:
             ip = prtg.get_device_host(did)
             if ip:
                 targets.append((did, ip, False))
@@ -1067,13 +1099,39 @@ async def process_device(
             logger.info("No template found on device. Using default: %s", config.port_name_template)
 
     # 2. SNMP Community Resolution
-    # Fetch from PRTG (includes fallback to config if API fails)
-    community = prtg.get_inherited_snmp_community(device_id)
+    community = config.snmp_community
     
+    # Check for Group-Specific Credential Override
+    # This requires us to know the Group ID(s) the device belongs to.
+    # We can check the direct parent.
+    if config.group_credentials:
+        # We need to traverse up the tree to find if any parent group matches a configured credential.
+        # This is expensive if done for every device, but correct.
+        # Optimization: Just check direct parent for now? No, user might set it at a higher folder.
+        # Let's walk up 5 levels max.
+        curr_id = device_id
+        found_comm = None
+        for _ in range(5):
+            parent_id = prtg.get_parent_id(curr_id)
+            if not parent_id:
+                break
+            
+            # Check if this parent group has a credential mapped
+            if parent_id in config.group_credentials:
+                mapped_comm = config.group_credentials[parent_id]
+                if mapped_comm:  # Ensure it's not empty
+                    found_comm = mapped_comm
+                    logger.debug("Found mapped community for Group %s: %s", parent_id, found_comm)
+                    break  # Stop at nearest match
+
+            curr_id = parent_id
+
+        if found_comm:
+            community = found_comm
     if not community:
         community = "public"
-        logger.warning("No SNMP community provided or inherited. Defaulting to 'public'.")
-    
+        logger.warning("No SNMP community resolved. Defaulting to 'public'.")
+
     # 3. Local SNMP Scan
     snmp = SNMPScanner(community, config.snmp_port)
     interfaces = await snmp.scan_interfaces(device_ip)
@@ -1081,7 +1139,10 @@ async def process_device(
 
     if not interfaces:
         # Fallback Cleanup Logic
-        logger.warning("SNMP Scan failed for %s. Attempting fallback cleanup based on PRTG messages.", device_ip)
+        logger.warning(
+            "SNMP Scan failed for %s. Attempting fallback cleanup based on PRTG messages.",
+            device_ip
+        )
         result.errors.append("SNMP Scan Failed - Running Fallback Cleanup")
 
         # Get Current Sensors for Fallback
@@ -1091,22 +1152,25 @@ async def process_device(
 
         for s in current_sensors:
             # Check for specific PRTG message indicating interface is admin down
-            msg = s.get("message_raw", "")  # PRTG often returns message_raw in JSON for message
+            msg = s.get("message_raw", "")  # PRTG often returns message_raw in JSON
             if not msg:
                 msg = s.get("message", "")
 
             # Look for "ifAdminStatus=down" or "ifAdminStatus = down" or "Code: 2"
-            # The user screenshot showed: "ifAdminStatus=down (2) (code: ..."
             msg_lower = msg.lower()
             logger.debug("Fallback check sensor %s: msg='%s'", s.get("name"), msg)
             if "ifadminstatus=down" in msg_lower or "(2)" in msg_lower:
                 if config.cleanup_legacy:
                     if dry_run:
-                        logger.info("[DRY-RUN] Fallback: Would DELETE sensor %s (ID: %s)",
-                                    s.get("name"), s.get("objid"))
+                        logger.info(
+                            "[DRY-RUN] Fallback: Would DELETE sensor %s (ID: %s)",
+                            s.get("name"), s.get("objid")
+                        )
                     else:
-                        logger.info("Fallback: Deleting sensor %s (ID: %s)",
-                                    s.get("name"), s.get("objid"))
+                        logger.info(
+                            "Fallback: Deleting sensor %s (ID: %s)",
+                            s.get("name"), s.get("objid")
+                        )
                         try:
                             prtg.delete_object(s['objid'])
                         except requests.RequestException as e:
@@ -1115,14 +1179,22 @@ async def process_device(
                     # Only pause if not already paused
                     if s.get("status_raw") not in [7, 8, 9, 11, 12]:  # Not Paused
                         if dry_run:
-                            logger.info("[DRY-RUN] Fallback: Would PAUSE sensor %s (ID: %s)",
-                                        s.get("name"), s.get("objid"))
+                            logger.info(
+                                "[DRY-RUN] Fallback: Would PAUSE sensor %s (ID: %s)",
+                                s.get("name"), s.get("objid")
+                            )
                         else:
-                            prtg.pause_sensor(s['objid'], "Paused (Fallback: ifAdminStatus=down)")
+                            prtg.pause_sensor(
+                                s['objid'], "Paused (Fallback: ifAdminStatus=down)"
+                            )
                             result.legacy_sensors_paused += 1
-                            logger.info("Fallback: Paused %s (ID: %s)", s.get("name"), s['objid'])
+                            logger.info(
+                                "Fallback: Paused %s (ID: %s)", s.get("name"), s['objid']
+                            )
                     else:
-                        logger.debug("Fallback: Sensor %s already paused.", s.get("name"))
+                        logger.debug(
+                            "Fallback: Sensor %s already paused.", s.get("name")
+                        )
 
         result.print_summary()
         return
@@ -1131,7 +1203,9 @@ async def process_device(
     current_sensors = [] if dry_run and is_new else prtg.list_sensors(device_id)
 
     # 3. Create Core Sensors
-    core_keepers = await ensure_core_sensors(prtg, device_id, current_sensors, result, dry_run)
+    core_keepers = await ensure_core_sensors(
+        prtg, device_id, current_sensors, result, dry_run
+    )
     ping_id = core_keepers.get("ping")
 
     # 4. Create Traffic Sensors
@@ -1157,10 +1231,14 @@ async def process_device(
             sid = s.get("objid")
             if sid not in keeper_ids:
                 if dry_run:
-                    logger.info("[DRY-RUN] Would DELETE non-standard sensor: %s (ID: %s, Type: %s)", 
-                                s.get("name"), sid, s.get("sensortype"))
+                    logger.info(
+                        "[DRY-RUN] Would DELETE non-standard sensor: %s (ID: %s, Type: %s)",
+                        s.get("name"), sid, s.get("sensortype")
+                    )
                 else:
-                    logger.info("Deleting non-standard sensor: %s (ID: %s)", s.get("name"), sid)
+                    logger.info(
+                        "Deleting non-standard sensor: %s (ID: %s)", s.get("name"), sid
+                    )
                     try:
                         prtg.delete_object(sid)
                     except requests.RequestException as e:
@@ -1171,13 +1249,18 @@ async def process_device(
             sid = s.get("objid")
             if "traffic" in s.get("sensortype", "").lower() and sid not in traffic_keepers:
                 # Only pause if not already paused
-                if s.get("status_raw") not in [7, 8, 9, 11, 12]: # Not Paused
+                if s.get("status_raw") not in [7, 8, 9, 11, 12]:  # Not Paused
                     if dry_run:
-                        logger.info("[DRY-RUN] Would pause legacy traffic sensor: %s (ID: %s)", s.get("name"), sid)
+                        logger.info(
+                            "[DRY-RUN] Would pause legacy traffic sensor: %s (ID: %s)",
+                            s.get("name"), sid
+                        )
                     else:
                         prtg.pause_sensor(sid, "Paused by Automation (Legacy)")
                         result.legacy_sensors_paused += 1
-                        logger.info("Paused legacy traffic sensor: %s (ID: %s)", s.get("name"), sid)
+                        logger.info(
+                            "Paused legacy traffic sensor: %s (ID: %s)", s.get("name"), sid
+                        )
 
     result.print_summary()
 
@@ -1195,16 +1278,21 @@ def cleanup_legacy_sensors(
         stype = s.get("sensortype", "").lower()
         sname = s.get("name", "").lower()
         is_traffic = "traffic" in stype or "traffic" in sname
-        
+
         # Skip if it's one of the sensors we just created/verified
         if not is_traffic or s.get("objid") in relevant_traffic_ids:
             continue
 
         if config.cleanup_legacy:
             if dry_run:
-                logger.info("[DRY-RUN] Would delete legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
+                logger.info(
+                    "[DRY-RUN] Would delete legacy sensor: %s (ID: %s)",
+                    s.get("name"), s.get("objid")
+                )
             else:
-                logger.info("Deleting legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
+                logger.info(
+                    "Deleting legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid")
+                )
                 try:
                     client.delete_object(s['objid'])
                 except requests.RequestException as e:
@@ -1213,13 +1301,54 @@ def cleanup_legacy_sensors(
             # Only pause if not already paused
             if s.get("status_raw") not in [7, 8, 9, 11, 12]:  # Not Paused
                 if dry_run:
-                    logger.info("[DRY-RUN] Would pause legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
+                    logger.info(
+                        "[DRY-RUN] Would pause legacy sensor: %s (ID: %s)",
+                        s.get("name"), s.get("objid")
+                    )
                 else:
                     client.pause_sensor(s['objid'], "Paused by Automation (Legacy)")
                     result.legacy_sensors_paused += 1
-                    logger.info("Paused legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid"))
+                    logger.info(
+                        "Paused legacy sensor: %s (ID: %s)", s.get("name"), s.get("objid")
+                    )
             else:
-                logger.debug("Skipping legacy purge for %s (ID: %s) - Already Paused", s.get("name"), s.get("objid"))
+                logger.debug(
+                    "Skipping legacy purge for %s (ID: %s) - Already Paused",
+                    s.get("name"), s.get("objid")
+                )
+
+def generate_config_file(prtg: PRTGClient):
+    """Generates a config.yaml with all groups pre-filled."""
+    logger.info("Fetching groups from PRTG...")
+    try:
+        groups = prtg.get_all_groups()
+    except requests.RequestException as e:
+        logger.error("Failed to fetch groups: %s", e)
+        return
+
+    # Sort by Probe, then Group Name
+    groups.sort(key=lambda x: (x.get('probe', ''), x.get('name', '')))
+
+    print("\n# Copy the following into your config.yaml:\n")
+    print("group_credentials:")
+
+    current_probe = None
+    for g in groups:
+        probe = g.get('probe', 'Unknown Probe')
+        name = g.get('name', 'Unknown Group')
+        gid = g.get('objid')
+
+        if probe != current_probe:
+            print(f"  # --- Probe: {probe} ---")
+            current_probe = probe
+
+        print(f"  # Group: \"{name}\" (ID: {gid})")
+        print(f"  {gid}: \"\"")
+
+    print("\n# End of generated config\n")
+    logger.info(
+        "Config snippet generated. Copy the output above into your config.yaml under 'group_credentials'."
+    )
 
 async def main():
     """Main entry point for the script."""
@@ -1230,6 +1359,10 @@ async def main():
 
     config = Config.from_args(args)
     prtg = PRTGClient(config)
+
+    if args.command == "generate-config":
+        generate_config_file(prtg)
+        return
 
     # Determine targets
     targets = await resolve_targets(args, prtg)
