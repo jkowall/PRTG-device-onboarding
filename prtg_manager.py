@@ -857,6 +857,26 @@ async def process_traffic_sensors(
 
     # 1. Identify existing sensor names and IDs
     existing_sensors = {s.get("name"): s.get("objid") for s in sensors}
+    
+    # Track claimed IDs to prevent double-matching
+    claimed_ids = set()
+
+    # Cache for sensor interface numbers to avoid repeated API calls
+    # Map: sensor_id -> interface_number (str)
+    ifindex_cache = {}
+
+    def get_cached_ifindex(sid: int) -> Optional[str]:
+        if sid in ifindex_cache:
+            return ifindex_cache[sid]
+        val = client.get_object_setting(sid, "interfacenumber")
+        ifindex_cache[sid] = str(val) if val is not None else None
+        return ifindex_cache[sid]
+
+    # Pre-filter traffic sensors for faster lookup in fallback
+    traffic_candidates = [
+        s for s in sensors 
+        if "traffic" in s.get("sensortype", "").lower()
+    ]
 
     # Debug: Log existing status of sensors to understand why they aren't being picked up or resumed
     for s in sensors:
@@ -892,25 +912,66 @@ async def process_traffic_sensors(
         sensor_name = sensor_name.replace("[ifsensor]", "SNMP Traffic")
         # Clean up double spaces or brackets if values were empty
         sensor_name = ' '.join(sensor_name.split())
-        # 3. Duplicate Check
+        
+        # 3. Match Strategy
+        matched_sensor_id = None
+        match_method = None # "name" or "ifindex"
+
+        # A. Try Name Match
         if sensor_name in existing_sensors:
-            existing_id = existing_sensors[sensor_name]
-            logger.debug("Existing sensor matches name: %s (ID: %s)", sensor_name, existing_id)
-            relevant_ids.append(existing_id)
-            # CRITICAL FIX: Ensure existing sensor is unpaused
-            # Find the sensor dict to check status
-            s = next((s for s in sensors if s['objid'] == existing_id), None)
-            if s and s.get("status_raw") in [7, 8, 9, 11, 12]: # Paused
-                 if dry_run:
-                     logger.info("[DRY-RUN] Would RESUME matched traffic sensor: %s", sensor_name)
-                 else:
+            matched_sensor_id = existing_sensors[sensor_name]
+            match_method = "name"
+        
+        # B. Fallback: Try Interface Number Match
+        if not matched_sensor_id:
+            for cand in traffic_candidates:
+                cid = cand['objid']
+                if cid in claimed_ids:
+                    continue # Already matched to another interface
+                
+                # Check Name match in loop? No, covered by A.
+                # Check ifIndex
+                c_idx = get_cached_ifindex(cid)
+                if c_idx == str(idx):
+                    matched_sensor_id = cid
+                    match_method = "ifindex"
+                    break
+
+        if matched_sensor_id:
+            claimed_ids.add(matched_sensor_id)
+            relevant_ids.append(matched_sensor_id)
+            
+            logger.debug("Matched sensor for interface %s: ID %s (Method: %s)", idx, matched_sensor_id, match_method)
+
+            # Handle Logic (Resume, Rename if needed)
+            if dry_run:
+                 logger.info("[DRY-RUN] Found existing sensor for IF %s via %s match.", idx, match_method)
+                 if match_method == "ifindex":
+                     logger.info("[DRY-RUN] Would RENAME sensor %s to '%s'", matched_sensor_id, sensor_name)
+                 logger.info("[DRY-RUN] Would RESUME sensor %s", matched_sensor_id)
+            else:
+                # Rename if matched by index (Fixing the drift)
+                if match_method == "ifindex":
+                    logger.info("Found sensor by ifIndex. Renaming ID %s to '%s'...", matched_sensor_id, sensor_name)
+                    try:
+                        client.set_property(matched_sensor_id, "name", sensor_name)
+                        # Update local map in case we loop again? (Not needed for this logic but good practice)
+                        existing_sensors[sensor_name] = matched_sensor_id 
+                    except requests.RequestException as e:
+                        logger.error("Failed to rename sensor %s: %s", matched_sensor_id, e)
+
+                # Resume if paused
+                s_obj = next((s for s in sensors if s['objid'] == matched_sensor_id), None)
+                if s_obj and s_obj.get("status_raw") in [7, 8, 9, 11, 12]: # Paused
                      logger.info("Resuming matched traffic sensor: %s", sensor_name)
                      try:
-                         client.pause_sensor(existing_id, action=1) # 1 = Resume
+                         client.pause_sensor(matched_sensor_id, action=1) # 1 = Resume
                      except requests.RequestException as e:
-                         logger.error("Failed to resume sensor %s: %s", existing_id, e)
+                         logger.error("Failed to resume sensor %s: %s", matched_sensor_id, e)
+            
             continue
 
+        # If we get here, no match found. Create new.
         if dry_run:
             logger.info(
                 "[DRY-RUN] Would clone template for 'snmptraffic' to create %s (ifIndex %s).",
@@ -940,6 +1001,7 @@ async def process_traffic_sensors(
                     client.set_property(new_id, "discinout", "1")  # Discards in and discards out
 
                     relevant_ids.append(new_id)
+                    claimed_ids.add(new_id) # Mark new one as claimed too
                     result.traffic_sensors_created += 1
                     logger.info("Created: %s (ID: %s)", sensor_name, new_id)
                     # Resume the new sensor immediately
