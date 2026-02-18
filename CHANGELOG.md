@@ -1,6 +1,14 @@
 # Changelog
 
-## [1.8.0] - 2026-02-16
+## [1.8.1] - 2026-02-19
+
+### Fixed
+
+- **Sensor Matching**: Improved traffic sensor matching by including `interfacenumber` in the initial sensor list fetch. This reliably identifies sensors even if PRTG auto-discovery renames them.
+- **API Optimization**: Eliminated redundant API calls per interface by fetching all necessary sensor properties (type, status, interface number) in a single batch.
+- **Robust Deduplication**: Updated core sensor matching to use the correct PRTG API `type` field, improving deduplication reliability for Ping, CPU, Memory, and Uptime sensors.
+
+## [1.8.0] - 2026-02-17
 
 ### Added
 

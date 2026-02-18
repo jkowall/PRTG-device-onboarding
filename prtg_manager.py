@@ -161,7 +161,7 @@ def setup_logging(debug: bool = False):
 setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 # --- Constants ---
 
@@ -510,15 +510,20 @@ class PRTGClient:
         return data.get("groups", [])
 
     def list_sensors(self, device_id: int) -> List[Dict]:
-        """Get all sensors for a device."""
+        """Get all sensors for a device with full details for matching."""
         data = self._req("GET", "/api/table.json", params={
             "content": "sensors",
             "filter_parentid": device_id,
-            "columns": "objid,sensor,sensortype,status,name,message",
+            "columns": "objid,sensor,type,status,name,message,interfacenumber,status_raw",
             "count": 5000,
             "output": "json"
         })
-        return data.get("sensors", [])
+        sensors = data.get("sensors", [])
+        # Ensure 'sensortype' is available for backward compatibility with existing logic
+        for s in sensors:
+            if 'sensor' in s and 'sensortype' not in s:
+                s['sensortype'] = s['sensor']
+        return sensors
 
     def get_devices_in_group_recursive(self, group_id: int) -> List[Dict]:
         """Fetches all devices under a group recursively."""
@@ -748,7 +753,9 @@ async def ensure_core_sensors(
     def find_matching_sensors(key_types):
         matches = []
         for s in sensors:
-            s_type = s.get("sensortype", "").lower()
+            # PRTG API uses 'type' for the internal string (e.g. 'ping', 'snmpcpu')
+            # and 'sensor' for the display type (e.g. 'Ping', 'SNMP CPU Load')
+            s_type = s.get("type", "").lower()
             s_name = s.get("name", "").lower()
             # Match by type OR name (for some legacy sensors)
             if any(t in s_type for t in key_types) or any(t in s_name for t in key_types):
@@ -856,33 +863,26 @@ async def process_traffic_sensors(
     relevant_ids = []
 
     # 1. Identify existing sensor names and IDs
-    existing_sensors = {s.get("name"): s.get("objid") for s in sensors}
-    
+    # Use both name and name_raw if available
+    existing_sensors = {}
+    for s in sensors:
+        name = s.get("name")
+        if name:
+            existing_sensors[name] = s.get("objid")
+
     # Track claimed IDs to prevent double-matching
     claimed_ids = set()
-
-    # Cache for sensor interface numbers to avoid repeated API calls
-    # Map: sensor_id -> interface_number (str)
-    ifindex_cache = {}
-
-    def get_cached_ifindex(sid: int) -> Optional[str]:
-        if sid in ifindex_cache:
-            return ifindex_cache[sid]
-        val = client.get_object_setting(sid, "interfacenumber")
-        ifindex_cache[sid] = str(val) if val is not None else None
-        return ifindex_cache[sid]
 
     # Pre-filter traffic sensors for faster lookup in fallback
     traffic_candidates = [
         s for s in sensors 
-        if "traffic" in s.get("sensortype", "").lower()
+        if "traffic" in s.get("type", "").lower() or "traffic" in s.get("sensortype", "").lower()
     ]
 
     # Debug: Log existing status of sensors to understand why they aren't being picked up or resumed
-    for s in sensors:
-        if "traffic" in s.get("sensortype", "").lower():
-            logger.debug("Existing Traffic Sensor: %s (ID: %s, Type: %s, Status: %s)",
-                         s.get("name"), s.get("objid"), s.get("sensortype"), s.get("status_raw"))
+    for s in traffic_candidates:
+        logger.debug("Existing Traffic Sensor: %s (ID: %s, Interface: %s, Status: %s)",
+                     s.get("name"), s.get("objid"), s.get("interfacenumber"), s.get("status_raw"))
 
     for iface in interfaces:
         idx = iface['ifindex']
@@ -929,10 +929,9 @@ async def process_traffic_sensors(
                 if cid in claimed_ids:
                     continue # Already matched to another interface
                 
-                # Check Name match in loop? No, covered by A.
-                # Check ifIndex
-                c_idx = get_cached_ifindex(cid)
-                if c_idx == str(idx):
+                # Check ifIndex (now available in the pre-fetched list)
+                c_idx = cand.get("interfacenumber")
+                if c_idx and str(c_idx) == str(idx):
                     matched_sensor_id = cid
                     match_method = "ifindex"
                     break
@@ -1295,7 +1294,7 @@ async def process_device(
                 if dry_run:
                     logger.info(
                         "[DRY-RUN] Would DELETE non-standard sensor: %s (ID: %s, Type: %s)",
-                        s.get("name"), sid, s.get("sensortype")
+                        s.get("name"), sid, s.get("type", s.get("sensortype"))
                     )
                 else:
                     logger.info(
@@ -1309,7 +1308,8 @@ async def process_device(
         # Legacy Mode: Only pause traffic sensors that aren't relevant
         for s in current_sensors:
             sid = s.get("objid")
-            if "traffic" in s.get("sensortype", "").lower() and sid not in traffic_keepers:
+            stype = (s.get("type") or s.get("sensortype") or "").lower()
+            if "traffic" in stype and sid not in traffic_keepers:
                 # Only pause if not already paused
                 if s.get("status_raw") not in [7, 8, 9, 11, 12]:  # Not Paused
                     if dry_run:
@@ -1337,7 +1337,7 @@ def cleanup_legacy_sensors(
     """Identifies and cleans up (or pauses) legacy traffic sensors."""
     for s in current_sensors:
         # Case-insensitive check for traffic sensors (by Type OR Name)
-        stype = s.get("sensortype", "").lower()
+        stype = (s.get("type") or s.get("sensortype") or "").lower()
         sname = s.get("name", "").lower()
         is_traffic = "traffic" in stype or "traffic" in sname
 
