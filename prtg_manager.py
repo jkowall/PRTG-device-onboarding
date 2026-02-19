@@ -161,7 +161,7 @@ def setup_logging(debug: bool = False):
 setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.8.1"
+__version__ = "1.8.2"
 
 # --- Constants ---
 
@@ -673,21 +673,28 @@ class PRTGClient:
         """Clones a source sensor to the target device with a new name.
         Returns new ID if successful."""
         try:
-            # 1. Perform the clone
+            # 1. Snapshot existing sensor IDs BEFORE cloning to avoid
+            #    returning a pre-existing sensor with the same name.
+            pre_existing_ids = {
+                s.get("objid") for s in self.list_sensors(target_device_id)
+            }
+
+            # 2. Perform the clone
             self._req("GET", "/api/duplicateobject.htm", params={
                 "id": source_id,
                 "targetid": target_device_id,
                 "name": new_name
             })
 
-            # 2. PRTG doesn't return the ID, so we must find it.
-            # We search the target device for the sensor with the specific name.
+            # 3. PRTG doesn't return the ID, so we must find it.
+            # We search the target device for the sensor with the specific name
+            # that was NOT present before cloning.
             # Retry a few times as creation might be async
             for _ in range(5):
                 await asyncio.sleep(1) # Wait for creation
                 sensors = self.list_sensors(target_device_id)
                 for s in sensors:
-                    if s.get("name") == new_name:
+                    if s.get("name") == new_name and s.get("objid") not in pre_existing_ids:
                         return s.get("objid")
 
             logger.error(
@@ -917,10 +924,12 @@ async def process_traffic_sensors(
         matched_sensor_id = None
         match_method = None # "name" or "ifindex"
 
-        # A. Try Name Match
+        # A. Try Name Match (also check claimed_ids to prevent double-matching)
         if sensor_name in existing_sensors:
-            matched_sensor_id = existing_sensors[sensor_name]
-            match_method = "name"
+            candidate_id = existing_sensors[sensor_name]
+            if candidate_id not in claimed_ids:
+                matched_sensor_id = candidate_id
+                match_method = "name"
         
         # B. Fallback: Try Interface Number Match
         if not matched_sensor_id:
@@ -1273,6 +1282,11 @@ async def process_device(
     traffic_keepers = await process_traffic_sensors(
         prtg, device_id, interfaces, current_sensors, result, config, dry_run
     )
+
+    # 4b. Refresh sensor list after traffic processing so cleanup
+    #     operates on the current state (includes newly created sensors)
+    if not (dry_run and is_new):
+        current_sensors = prtg.list_sensors(device_id)
 
     # 5. Set Dependencies
     if ping_id and not dry_run:

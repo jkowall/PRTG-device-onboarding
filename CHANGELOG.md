@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.8.2] - 2026-02-19
+
+### Fixed
+
+- **Duplicate Sensor Regression**: Fixed a critical bug where running the script twice on the same device created a paused duplicate sensor. Root cause was threefold:
+  - `clone_sensor` could return the ID of a pre-existing sensor with the same name instead of the newly cloned one. Now snapshots existing IDs before cloning.
+  - Name matching in `process_traffic_sensors` did not check `claimed_ids`, allowing the same sensor to be double-matched across iterations.
+  - `process_device` cleanup used a stale sensor snapshot that didn't include sensors created during the current run. Now refreshes the sensor list after traffic processing.
+- **Added Unit Tests**: Comprehensive test suite (`tests/test_traffic_sensors.py`) covering clone ID guard, name-match claimed_ids, idempotent re-runs, and cleanup fresh-snapshot logic.
+
 ## [1.8.1] - 2026-02-19
 
 ### Fixed
