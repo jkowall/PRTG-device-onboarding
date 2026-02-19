@@ -2,3 +2,4 @@ requests
 pysnmp>=7.1.22
 pylint
 PyYAML
+pytest

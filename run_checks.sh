@@ -10,3 +10,6 @@ else
 fi
 
 $PYLINT --fail-under=8.0 prtg_manager.py
+
+echo "Running Unit Tests..."
+python3 -m pytest tests/
