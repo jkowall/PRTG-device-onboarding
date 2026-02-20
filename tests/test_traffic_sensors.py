@@ -390,5 +390,85 @@ class TestCleanupFreshSnapshot(unittest.TestCase):
         self.assertEqual(sensors_to_pause, [200])
 
 
+# --- Test: Partial Name Match fallback ---
+
+class TestPartialNameMatch(unittest.TestCase):
+    """Verify that when ifindex is missing and exact name fails,
+    the script uses a partial name prefix match."""
+
+    def test_partial_name_match_without_ifindex(self):
+        """If exact name fails but existing name starts with the targeted name
+        followed by a space or other boundary, match it and rename it."""
+        # Setup: Missing interfacenumber, name slightly modified in PRTG
+        sensors = [
+            make_sensor(101, "(sfp-sfpplus7) sfp-sfpplus7", interfacenumber=None),
+        ]
+        interfaces = [
+            make_interface(7, "sfp-sfpplus7", ""),
+        ]
+
+        existing_sensors = {s.get("name"): s.get("objid") for s in sensors}
+        claimed_ids = set()
+        traffic_candidates = [
+            s for s in sensors
+            if "traffic" in s.get("type", "").lower()
+        ]
+
+        template = "([ifname]) [ifalias]"
+        should_clone = False
+
+        for iface in interfaces:
+            idx = iface['ifindex']
+            sensor_name = template.replace("[ifname]", iface['ifname'])
+            sensor_name = sensor_name.replace("[ifalias]", iface['ifalias'])
+            sensor_name = ' '.join(sensor_name.split())
+
+            matched_sensor_id = None
+            match_method = None
+
+            # A. Name Match (Exact)
+            if sensor_name in existing_sensors:
+                candidate_id = existing_sensors[sensor_name]
+                if candidate_id not in claimed_ids:
+                    matched_sensor_id = candidate_id
+                    match_method = "name"
+
+            # B. ifIndex Match
+            if not matched_sensor_id:
+                for cand in traffic_candidates:
+                    cid = cand['objid']
+                    if cid in claimed_ids:
+                        continue
+                    c_idx = cand.get("interfacenumber")
+                    if c_idx and str(c_idx) == str(idx):
+                        matched_sensor_id = cid
+                        match_method = "ifindex"
+                        break
+
+            # C. Partial Name Match
+            if not matched_sensor_id:
+                for name, candidate_id in existing_sensors.items():
+                    if candidate_id in claimed_ids:
+                        continue
+                    if name.startswith(sensor_name) and len(name) > len(sensor_name):
+                        next_char = name[len(sensor_name)]
+                        if next_char in " -_:.":
+                            matched_sensor_id = candidate_id
+                            match_method = "name_partial"
+                            break
+
+            if matched_sensor_id:
+                claimed_ids.add(matched_sensor_id)
+            else:
+                should_clone = True
+
+            # Assertions for the simulation loop
+            self.assertEqual(matched_sensor_id, 101)
+            self.assertEqual(match_method, "name_partial")
+
+        # Must not have decided to clone a new sensor
+        self.assertFalse(should_clone)
+
+
 if __name__ == "__main__":
     unittest.main()

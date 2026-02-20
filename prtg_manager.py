@@ -161,7 +161,7 @@ def setup_logging(debug: bool = False):
 setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.8.2"
+__version__ = "1.8.3"
 
 # --- Constants ---
 
@@ -922,7 +922,7 @@ async def process_traffic_sensors(
         
         # 3. Match Strategy
         matched_sensor_id = None
-        match_method = None # "name" or "ifindex"
+        match_method = None # "name", "ifindex", "name_partial"
 
         # A. Try Name Match (also check claimed_ids to prevent double-matching)
         if sensor_name in existing_sensors:
@@ -945,6 +945,21 @@ async def process_traffic_sensors(
                     match_method = "ifindex"
                     break
 
+        # C. Fallback: Partial Name Match
+        if not matched_sensor_id:
+            for name, candidate_id in existing_sensors.items():
+                if candidate_id in claimed_ids:
+                    continue
+                
+                # If the existing sensor name begins with the exact targeting string
+                # AND what follows is a space or boundary character (e.g., "(sfp...) "
+                if name.startswith(sensor_name) and len(name) > len(sensor_name):
+                    next_char = name[len(sensor_name)]
+                    if next_char in " -_:.":
+                        matched_sensor_id = candidate_id
+                        match_method = "name_partial"
+                        break
+
         if matched_sensor_id:
             claimed_ids.add(matched_sensor_id)
             relevant_ids.append(matched_sensor_id)
@@ -954,13 +969,13 @@ async def process_traffic_sensors(
             # Handle Logic (Resume, Rename if needed)
             if dry_run:
                  logger.info("[DRY-RUN] Found existing sensor for IF %s via %s match.", idx, match_method)
-                 if match_method == "ifindex":
+                 if match_method in ("ifindex", "name_partial"):
                      logger.info("[DRY-RUN] Would RENAME sensor %s to '%s'", matched_sensor_id, sensor_name)
                  logger.info("[DRY-RUN] Would RESUME sensor %s", matched_sensor_id)
             else:
                 # Rename if matched by index (Fixing the drift)
-                if match_method == "ifindex":
-                    logger.info("Found sensor by ifIndex. Renaming ID %s to '%s'...", matched_sensor_id, sensor_name)
+                if match_method in ("ifindex", "name_partial"):
+                    logger.info("Found sensor by %s. Renaming ID %s to '%s'...", match_method, matched_sensor_id, sensor_name)
                     try:
                         client.set_property(matched_sensor_id, "name", sensor_name)
                         # Update local map in case we loop again? (Not needed for this logic but good practice)

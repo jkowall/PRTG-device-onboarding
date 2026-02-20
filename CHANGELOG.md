@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.8.3] - 2026-02-20
+
+### Fixed
+
+- **Partial Name Match**: Added a fallback matching strategy in `process_traffic_sensors` for cases where PRTG does not return an `interfacenumber` (ifIndex) and the exact name match fails. This prevents duplicate sensors from being created when the PRTG sensor name is a slightly modified version of the generated name (e.g., `(sfp-sfpplus7) sfp-sfpplus7`).
+
 ## [1.8.2] - 2026-02-19
 
 ### Fixed
