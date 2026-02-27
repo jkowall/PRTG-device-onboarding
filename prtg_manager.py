@@ -161,7 +161,7 @@ def setup_logging(debug: bool = False):
 setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.8.3"
+__version__ = "1.8.4"
 
 # --- Constants ---
 
@@ -791,6 +791,20 @@ async def ensure_core_sensors(
             matches.sort(key=specific_sort)
             selected_sensor = matches[0]
             
+            # Normalize name if it doesn't match the standard
+            current_name = selected_sensor.get("name", "")
+            if current_name != name:
+                if dry_run:
+                    logger.info("[DRY-RUN] Would RENAME %s sensor (ID: %s) from '%s' to '%s'",
+                                name, selected_sensor['objid'], current_name, name)
+                else:
+                    logger.info("Renaming %s sensor (ID: %s) from '%s' to '%s'",
+                                name, selected_sensor['objid'], current_name, name)
+                    try:
+                        client.set_property(selected_sensor['objid'], "name", name)
+                    except requests.RequestException as e:
+                        logger.error("Failed to rename sensor %s: %s", selected_sensor['objid'], e)
+
             # Resume if paused
             if selected_sensor.get("status_raw") in [7, 8, 9, 11, 12]: # Paused states
                 if dry_run:
@@ -817,7 +831,10 @@ async def ensure_core_sensors(
             # Assign to keepers
             keepers[key] = selected_sensor['objid']
 
-            result.foundational_sensors_created.append(f"{name} (Existing)")
+            if current_name != name:
+                result.foundational_sensors_created.append(f"{name} (Existing, Renamed from '{current_name}')")
+            else:
+                result.foundational_sensors_created.append(f"{name} (Existing)")
 
         else:
             # Create New

@@ -114,7 +114,7 @@ This script is compatible with PRTG Hosted Monitor, but requires specific networ
 ## How it Works
 
 1. **Fallback Cleanup**: If the direct SNMP scan fails, the tool performs a fallback check of PRTG's status messages for `ifAdminStatus=down` to ensure deactivated ports are still paused.
-2. **Core Sensors**: Ensures Ping, CPU, Memory, and Uptime sensors exist.
+2. **Core Sensors**: Ensures Ping, CPU, Memory, and Uptime sensors exist. Existing sensors with non-standard names (e.g., `SNMP CPU Load`, `SNMP Memory`, `SNMP System Uptime`) are automatically renamed to the standard convention (`PING`, `SNMP CPU`, `SNMP MEM`, `SNMP UPTIME`).
 
 ## License
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.4] - 2026-02-27
+
+### Added
+
+- **Core Sensor Name Normalization**: Existing SNMP CPU, SNMP Memory, and SNMP Uptime sensors are now automatically renamed to the standard naming convention (`SNMP CPU`, `SNMP MEM`, `SNMP UPTIME`) when their names differ (e.g., `SNMP CPU Load`, `SNMP Memory`, `SNMP System Uptime`). Ensures consistent naming across all devices.
+- **Unit Tests**: Added `tests/test_core_sensor_rename.py` with 6 tests covering rename behavior, no-op for standard names, and dry-run mode.
+
 ## [1.8.3] - 2026-02-20
 
 ### Fixed
