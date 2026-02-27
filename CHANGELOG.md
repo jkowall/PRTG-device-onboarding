@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.4] - 2026-02-27
+
+### Fixed
+
+- **Dependency Setting Crash**: Fixed `set_dependency()` failing with a 400 error ("The selected dependency is not valid") on devices with an improperly configured existing dependency. The PRTG API validates the current dependency reference when `dependencytype` is changed, so the sensor ID must be set before switching the type. Reversed the property-setting order to set `dependency` first, then `dependencytype`.
+- **Unhandled Exception**: Added error handling around the `set_dependency()` call in `process_device()` so a dependency-setting failure no longer halts the entire script. Errors are now logged and added to the device result.
+
 ## [1.8.3] - 2026-02-20
 
 ### Fixed
