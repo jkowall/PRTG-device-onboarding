@@ -7,6 +7,11 @@
 - **Core Sensor Name Normalization**: Existing SNMP CPU, SNMP Memory, and SNMP Uptime sensors are now automatically renamed to the standard naming convention (`SNMP CPU`, `SNMP MEM`, `SNMP UPTIME`) when their names differ (e.g., `SNMP CPU Load`, `SNMP Memory`, `SNMP System Uptime`). Ensures consistent naming across all devices.
 - **Unit Tests**: Added `tests/test_core_sensor_rename.py` with 6 tests covering rename behavior, no-op for standard names, and dry-run mode.
 
+### Fixed
+
+- **Dependency Setting Crash**: Fixed `set_dependency()` failing with a 400 error ("The selected dependency is not valid") on devices with an improperly configured existing dependency. The PRTG API validates the current dependency reference when `dependencytype` is changed, so the sensor ID must be set before switching the type. Reversed the property-setting order to set `dependency` first, then `dependencytype`.
+- **Unhandled Exception**: Added error handling around the `set_dependency()` call in `process_device()` so a dependency-setting failure no longer halts the entire script. Errors are now logged and added to the device result.
+
 ## [1.8.3] - 2026-02-20
 
 ### Fixed

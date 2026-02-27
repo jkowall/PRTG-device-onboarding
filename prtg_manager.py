@@ -718,8 +718,10 @@ class PRTGClient:
 
     def set_dependency(self, device_id: int, sensor_id: int):
         """Sets the device dependency to a specific sensor."""
-        self.set_property(device_id, "dependencytype", 1)
+        # Set the sensor reference first so PRTG has a valid target when
+        # we switch dependencytype to "select a sensor" (value 1).
         self.set_property(device_id, "dependency", sensor_id)
+        self.set_property(device_id, "dependencytype", 1)
 
     def delete_object(self, object_id: int):
         """Permanently deletes an object from PRTG."""
@@ -1322,8 +1324,12 @@ async def process_device(
 
     # 5. Set Dependencies
     if ping_id and not dry_run:
-        prtg.set_dependency(device_id, ping_id)
-        result.dependency_set = True
+        try:
+            prtg.set_dependency(device_id, ping_id)
+            result.dependency_set = True
+        except requests.RequestException as e:
+            logger.error("Failed to set dependency on device %s to sensor %s: %s", device_id, ping_id, e)
+            result.errors.append(f"Failed to set dependency: {e}")
 
     # 6. Strict Cleanup
     keeper_ids = set()
