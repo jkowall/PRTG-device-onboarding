@@ -161,7 +161,7 @@ def setup_logging(debug: bool = False):
 setup_logging()
 logger = logging.getLogger(__name__)
 
-__version__ = "1.8.4"
+__version__ = "1.8.5"
 
 # --- Constants ---
 
@@ -175,6 +175,17 @@ PHYSICAL_IF_TYPES = {
     # propVirtual (often used for VLANs/Subinterfaces,
     # remove if strictly physical ports desired)
     53,
+}
+
+# Interface names to always exclude from traffic sensor creation,
+# regardless of ifType. Defense-in-depth for devices that misreport
+# loopback/null interfaces as physical (e.g., MikroTik ifType=6 on lo).
+EXCLUDED_IF_NAMES = {
+    "lo",        # Linux/MikroTik loopback
+    "lo0",       # FreeBSD/Junos loopback
+    "loopback",  # Generic loopback
+    "null",      # Null/discard interface
+    "null0",     # Cisco/Juniper null interface
 }
 
 # PRTG Sensor Types
@@ -916,13 +927,23 @@ async def process_traffic_sensors(
         alias = iface.get('ifalias', '')
         descr = iface.get('ifdescr', '')
         
-        logger.debug("Processing Interface %s: ifName='%s', ifAlias='%s', ifDescr='%s', Status=%s", 
-                     idx, name, alias, descr, iface['ifadminstatus'])
+        logger.debug("Processing Interface %s: ifName='%s', ifAlias='%s', ifDescr='%s', "
+                     "ifType=%s, Status=%s",
+                     idx, name, alias, descr, iface['iftype'], iface['ifadminstatus'])
+
+        # Filter: Excluded interface names (defense-in-depth)
+        if name.lower() in EXCLUDED_IF_NAMES:
+            logger.debug("Skipping Interface %s ('%s'): excluded name", idx, name)
+            continue
 
         # Filter: Physical & Admin Up
         if iface['ifadminstatus'] != 1:
+            logger.debug("Skipping Interface %s ('%s'): AdminStatus=%s (not Up)",
+                         idx, name, iface['ifadminstatus'])
             continue
         if iface['iftype'] not in PHYSICAL_IF_TYPES:
+            logger.debug("Skipping Interface %s ('%s'): ifType=%s not in PHYSICAL_IF_TYPES",
+                         idx, name, iface['iftype'])
             continue
 
         result.interfaces_eligible += 1

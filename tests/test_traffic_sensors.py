@@ -470,5 +470,52 @@ class TestPartialNameMatch(unittest.TestCase):
         self.assertFalse(should_clone)
 
 
+# --- Test: Name-based exclusion filter (defense-in-depth) ---
+
+class TestExcludedInterfaceNames(unittest.TestCase):
+    """Verify that interfaces with excluded names are filtered out
+    even if they report a physical ifType (defense-in-depth)."""
+
+    # Mirrors constants from prtg_manager.py
+    EXCLUDED_IF_NAMES = {"lo", "lo0", "loopback", "null", "null0"}
+    PHYSICAL_IF_TYPES = {6, 7, 62, 117, 161, 53}
+
+    def _is_eligible(self, iface):
+        """Simulate the filtering logic from process_traffic_sensors."""
+        name = iface.get('ifname', '')
+        if name.lower() in self.EXCLUDED_IF_NAMES:
+            return False
+        if iface['ifadminstatus'] != 1:
+            return False
+        if iface['iftype'] not in self.PHYSICAL_IF_TYPES:
+            return False
+        return True
+
+    def test_loopback_lo_excluded_despite_iftype_6(self):
+        """MikroTik 'lo' with ifType=6 must be excluded."""
+        iface = make_interface(1, "lo", iftype=6, ifadminstatus=1)
+        self.assertFalse(self._is_eligible(iface))
+
+    def test_loopback_case_insensitive(self):
+        """'Loopback' (mixed case) with ifType=6 must be excluded."""
+        iface = make_interface(1, "Loopback", iftype=6, ifadminstatus=1)
+        self.assertFalse(self._is_eligible(iface))
+
+    def test_null0_excluded(self):
+        """'null0' with ifType=6 must be excluded."""
+        iface = make_interface(1, "null0", iftype=6, ifadminstatus=1)
+        self.assertFalse(self._is_eligible(iface))
+
+    def test_lo0_excluded(self):
+        """FreeBSD/Junos 'lo0' with ifType=6 must be excluded."""
+        iface = make_interface(1, "lo0", iftype=6, ifadminstatus=1)
+        self.assertFalse(self._is_eligible(iface))
+
+    def test_physical_interface_not_excluded(self):
+        """Normal 'ether1' with ifType=6 must NOT be excluded."""
+        iface = make_interface(1, "ether1", iftype=6, ifadminstatus=1)
+        self.assertTrue(self._is_eligible(iface))
+
+
 if __name__ == "__main__":
     unittest.main()
