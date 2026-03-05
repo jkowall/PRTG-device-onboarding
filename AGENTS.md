@@ -4,7 +4,7 @@ Instructions for AI agents working on this project.
 
 ## Project Architecture
 
-- **Single-file app**: `prtg_manager.py` (v1.8.3) — all logic lives here
+- **Single-file app**: `prtg_manager.py` (v1.8.5) — all logic lives here
 - **Key classes**: `Config`, `SNMPScanner`, `PRTGClient`, `OnboardingResult`
 - **Key functions**: `ensure_core_sensors`, `process_traffic_sensors`, `process_device`, `cleanup_legacy_sensors`
 - **Tests**: `tests/test_traffic_sensors.py` (pytest + unittest.mock)
@@ -41,6 +41,7 @@ Instructions for AI agents working on this project.
 - **Supported placeholders**: `[port]`, `[ifalias]`, `[ifname]`, `[ifdescr]`, `[ifspeed]`, `[ifsensor]`
 - **SNMP OIDs**: Always fetch `ifSpeed` (`1.3.6.1.2.1.2.2.1.5`) and `ifAlias` (`1.3.6.1.2.1.31.1.1.1.18`) for accurate naming
 - **Interface filtering**: Only create sensors for interfaces that are Physical and Administratively Up
+- **Name exclusion**: `EXCLUDED_IF_NAMES` constant provides defense-in-depth filtering for known non-physical names (`lo`, `loopback`, `lo0`, `null`, `null0`) regardless of reported ifType
 
 ## Configuration Hierarchy
 

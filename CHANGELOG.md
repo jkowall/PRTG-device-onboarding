@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.8.5] - 2026-03-06
+
+### Fixed
+
+- **Loopback Interface Exclusion**: Added `EXCLUDED_IF_NAMES` constant as defense-in-depth filtering for interfaces named `lo`, `loopback`, `lo0`, `null`, and `null0`. These are now excluded from traffic sensor creation even if the device reports them with a physical ifType (e.g., MikroTik reporting `lo` as ifType=6/ethernetCsmacd).
+
+### Improved
+
+- **Interface Filtering Diagnostics**: Added `ifType` to the "Processing Interface" debug log and added explicit debug messages when interfaces are skipped by name exclusion, admin status, or ifType filter.
+
 ## [1.8.4] - 2026-02-27
 
 ### Added
