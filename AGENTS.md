@@ -40,8 +40,7 @@ Instructions for AI agents working on this project.
 - **Port Name Template priority**: CLI `--port-name-template` > Env `PRTG_PORT_NAME_TEMPLATE` > Device `portnametemplate` property > fallback `([ifname]) [ifalias]`
 - **Supported placeholders**: `[port]`, `[ifalias]`, `[ifname]`, `[ifdescr]`, `[ifspeed]`, `[ifsensor]`
 - **SNMP OIDs**: Always fetch `ifSpeed` (`1.3.6.1.2.1.2.2.1.5`) and `ifAlias` (`1.3.6.1.2.1.31.1.1.1.18`) for accurate naming
-- **Interface filtering**: Only create sensors for interfaces that are Physical and Administratively Up
-- **Name exclusion**: `EXCLUDED_IF_NAMES` constant provides defense-in-depth filtering for known non-physical names (`lo`, `loopback`, `lo0`, `null`, `null0`) regardless of reported ifType
+- **Interface filtering**: Only create sensors for interfaces that are Physical (ifType in `PHYSICAL_IF_TYPES`) and Administratively Up
 
 ## Configuration Hierarchy
 
